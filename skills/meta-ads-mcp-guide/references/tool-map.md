@@ -1,6 +1,6 @@
 # Tool map
 
-Every tool this server registers, grouped by what you are trying to do. 142 in total; 79 are read-only.
+Every tool this server registers, grouped by what you are trying to do. 159 in total; 86 are read-only.
 
 A ⚠️ marks a tool that changes live data, spends money or touches stored credentials. Read the tool's own description before calling one: it carries the argument rules this map deliberately leaves out.
 
@@ -114,6 +114,26 @@ A ⚠️ marks a tool that changes live data, spends money or touches stored cre
 - `ads_create_lead_form` ⚠️ — Create an instant form for lead ads.
 - `ads_get_leads` — Download the leads submitted through a form.
 - `ads_get_ad_leads` — Download leads attributed to one ad.
+- `ads_clone_lead_form` ⚠️ — Clone a published form into a new editable version while preserving its questions and content.
+- `ads_archive_lead_form` ⚠️ — Archive a form after an explicit confirmation literal.
+- `ads_create_test_lead` ⚠️ — Create a Meta test lead for webhook and CRM delivery checks.
+- `ads_validate_lead_delivery` — Check leadgen webhook subscriptions and optionally read back a test lead.
+
+## Safe E2E publishing and local assets
+
+- `ads_begin_asset_upload` ⚠️ — Open an authenticated resumable upload and receive its chunk size and capability token.
+- `ads_upload_asset_chunk` ⚠️ — Send one checksummed base64 chunk, including safely out of order.
+- `ads_finalize_asset_upload` ⚠️ — Assemble, checksum and FFprobe an uploaded image or video before Meta receives it.
+- `ads_get_asset_upload` — Read upload progress and validated media metadata without exposing local paths.
+- `ads_delete_asset_upload` ⚠️ — Remove an incomplete upload handle without deleting any Meta resource.
+- `ads_preflight_publish` — Validate permissions, account, page, identity, pixel, form and lead webhook readiness.
+- `ads_plan_publish_bundle` — Produce an immutable campaign publication plan without mutating Meta.
+- `ads_apply_publish_bundle` ⚠️ — Apply a confirmed plan idempotently and leave every delivery object paused.
+- `ads_get_publish_bundle` — Read the bundle manifest, verification and all resource identifiers.
+- `ads_wait_for_review` — Observe pending, approved or rejected review states without promising approval.
+- `ads_plan_activate_bundle` — Validate a paused bundle and produce a separate expiring activation plan.
+- `ads_apply_activate_bundle` ⚠️ — Activate ads, then ad sets, then the campaign, rolling back to paused on failure.
+- `ads_pause_publish_bundle` ⚠️ — Pause an entire bundle without deleting any resource.
 
 ## Pixels and conversions
 

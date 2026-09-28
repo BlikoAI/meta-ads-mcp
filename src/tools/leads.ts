@@ -5,7 +5,8 @@ import { buildFieldsParam } from "../utils/validation.js";
 import { truncateResponse, validateMetaId } from "../utils/format.js";
 import { LEAD_FORM_DEFAULT_FIELDS, LEAD_DEFAULT_FIELDS } from "../meta/types/lead.js";
 import type { LeadForm, Lead, MetaApiResponse } from "../meta/types/index.js";
-import { READ, CREATE, WRITE_WARNING } from "./_register.js";
+import { READ, CREATE, TOGGLE, WRITE_WARNING } from "./_register.js";
+import { withPageToken } from "../meta/page-token.js";
 
 export function registerLeadTools(server: McpServer): void {
   // ─── Get Lead Forms ───────────────────────────────────────────
@@ -25,9 +26,11 @@ export function registerLeadTools(server: McpServer): void {
       const id = validateMetaId(page_id, "page");
       const fieldsParam = buildFieldsParam(fields, [...LEAD_FORM_DEFAULT_FIELDS]);
 
-      const response = await metaApiClient.get<MetaApiResponse<LeadForm>>(
-        `/${id}/leadgen_forms`,
-        { fields: fieldsParam, limit },
+      const response = await withPageToken(id, () =>
+        metaApiClient.get<MetaApiResponse<LeadForm>>(
+          `/${id}/leadgen_forms`,
+          { fields: fieldsParam, limit },
+        ),
       );
       const forms = response.data ?? [];
 
@@ -86,9 +89,10 @@ export function registerLeadTools(server: McpServer): void {
         params.filtering = JSON.stringify(filtering);
       }
 
-      const response = await metaApiClient.get<MetaApiResponse<Lead>>(
-        `/${id}/leads`,
-        params,
+      const form = await metaApiClient.get<{ page_id?: string }>(`/${id}`, { fields: "page_id" });
+      if (!form.page_id) throw new Error(`Could not determine the Page for lead form ${id}.`);
+      const response = await withPageToken(form.page_id, () =>
+        metaApiClient.get<MetaApiResponse<Lead>>(`/${id}/leads`, params),
       );
       const leads = response.data ?? [];
 
@@ -139,9 +143,18 @@ export function registerLeadTools(server: McpServer): void {
       const id = validateMetaId(ad_id, "ad");
       const fieldsParam = buildFieldsParam(fields, [...LEAD_DEFAULT_FIELDS]);
 
-      const response = await metaApiClient.get<MetaApiResponse<Lead>>(
-        `/${id}/leads`,
-        { fields: fieldsParam, limit },
+      const ad = await metaApiClient.get<{ creative?: { effective_object_story_id?: string } }>(
+        `/${id}`,
+        { fields: "creative{effective_object_story_id}" },
+      );
+      const storyId = ad.creative?.effective_object_story_id;
+      const pageId = storyId?.split("_")[0];
+      if (!pageId) throw new Error(`Could not determine the Page for ad ${id}.`);
+      const response = await withPageToken(pageId, () =>
+        metaApiClient.get<MetaApiResponse<Lead>>(
+          `/${id}/leads`,
+          { fields: fieldsParam, limit },
+        ),
       );
       const leads = response.data ?? [];
 
@@ -176,16 +189,22 @@ export function registerLeadTools(server: McpServer): void {
               type: z.string().describe("Question type (e.g., FULL_NAME, EMAIL, PHONE_NUMBER, CUSTOM)"),
               key: z.string().optional().describe("Custom question key"),
               label: z.string().optional().describe("Custom question label"),
+              options: z.array(z.object({ key: z.string(), value: z.string() })).optional().describe("Choices for multiple-choice questions"),
             }),
           )
           .describe("Form questions"),
         privacy_policy_url: z.string().describe("Privacy policy URL (required by Meta)"),
         follow_up_action_url: z.string().optional().describe("Thank you page URL"),
         locale: z.string().optional().describe("Form locale (e.g., en_US)"),
+        form_type: z.enum(["MORE_VOLUME", "HIGHER_INTENT", "RICH_CREATIVE"]).optional(),
+        is_optimized_for_quality: z.boolean().optional(),
+        context_card: z.record(z.string(), z.unknown()).optional().describe("Meta context_card object"),
+        thank_you_page: z.record(z.string(), z.unknown()).optional().describe("Complete Meta thank_you_page object"),
+        tracking_parameters: z.record(z.string(), z.string()).optional(),
       },
       annotations: { ...CREATE },
     },
-    async ({ page_id, name, questions, privacy_policy_url, follow_up_action_url, locale }) => {
+    async ({ page_id, name, questions, privacy_policy_url, follow_up_action_url, locale, form_type, is_optimized_for_quality, context_card, thank_you_page, tracking_parameters }) => {
       const id = validateMetaId(page_id, "page");
       const body: Record<string, string | number | boolean> = {
         name,
@@ -195,10 +214,14 @@ export function registerLeadTools(server: McpServer): void {
 
       if (follow_up_action_url) body.follow_up_action_url = follow_up_action_url;
       if (locale) body.locale = locale;
+      if (form_type) body.form_type = form_type;
+      if (is_optimized_for_quality !== undefined) body.is_optimized_for_quality = is_optimized_for_quality;
+      if (context_card) body.context_card = JSON.stringify(context_card);
+      if (thank_you_page) body.thank_you_page = JSON.stringify(thank_you_page);
+      if (tracking_parameters) body.tracking_parameters = JSON.stringify(tracking_parameters);
 
-      const result = await metaApiClient.postForm<{ id: string }>(
-        `/${id}/leadgen_forms`,
-        body,
+      const result = await withPageToken(id, () =>
+        metaApiClient.postForm<{ id: string }>(`/${id}/leadgen_forms`, body),
       );
 
       return {
@@ -209,6 +232,106 @@ export function registerLeadTools(server: McpServer): void {
           },
         ],
       };
+    },
+  );
+
+  server.registerTool(
+    "ads_clone_lead_form",
+    {
+      description: `${WRITE_WARNING}Clone an immutable published lead form into a new draft/version, optionally overriding its name and completion content.`,
+      inputSchema: {
+        form_id: z.string(),
+        name: z.string().min(1),
+        follow_up_action_url: z.string().optional(),
+        thank_you_page: z.record(z.string(), z.unknown()).optional(),
+      },
+      annotations: { ...CREATE },
+    },
+    async ({ form_id, name, follow_up_action_url, thank_you_page }) => {
+      const id = validateMetaId(form_id, "lead_form");
+      const source = await metaApiClient.get<Record<string, unknown>>(`/${id}`, {
+        fields: "id,page_id,questions,privacy_policy,locale,form_type,context_card,thank_you_page,tracking_parameters",
+      });
+      const pageId = typeof source["page_id"] === "string" ? source["page_id"] : undefined;
+      if (!pageId) throw new Error(`Could not determine the Page for lead form ${id}.`);
+      const body: Record<string, string | number | boolean> = { name };
+      for (const key of ["questions", "privacy_policy", "context_card", "tracking_parameters"] as const) {
+        if (source[key] !== undefined) body[key] = JSON.stringify(source[key]);
+      }
+      for (const key of ["locale", "form_type"] as const) {
+        if (typeof source[key] === "string") body[key] = source[key] as string;
+      }
+      if (follow_up_action_url) body.follow_up_action_url = follow_up_action_url;
+      const completion = thank_you_page ?? source["thank_you_page"];
+      if (completion) body.thank_you_page = JSON.stringify(completion);
+      const result = await withPageToken(pageId, () =>
+        metaApiClient.postForm<{ id: string }>(`/${pageId}/leadgen_forms`, body),
+      );
+      return { content: [{ type: "text", text: `Lead form cloned.\nSource: ${id}\nNew form: ${result.id}\nName: ${name}` }] };
+    },
+  );
+
+  server.registerTool(
+    "ads_archive_lead_form",
+    {
+      description: `${WRITE_WARNING}Archive a lead form. Requires the explicit confirmation literal ARCHIVE_FORM.`,
+      inputSchema: {
+        form_id: z.string(),
+        confirm: z.literal("ARCHIVE_FORM"),
+      },
+      annotations: { ...TOGGLE },
+    },
+    async ({ form_id }) => {
+      const id = validateMetaId(form_id, "lead_form");
+      const form = await metaApiClient.get<{ page_id?: string }>(`/${id}`, { fields: "page_id" });
+      if (!form.page_id) throw new Error(`Could not determine the Page for lead form ${id}.`);
+      await withPageToken(form.page_id, () => metaApiClient.postForm(`/${id}`, { status: "ARCHIVED" }));
+      return { content: [{ type: "text", text: `Lead form ${id} archived.` }] };
+    },
+  );
+
+  server.registerTool(
+    "ads_create_test_lead",
+    {
+      description: `${WRITE_WARNING}Create a Meta test lead for a form to validate CRM/webhook delivery.`,
+      inputSchema: {
+        form_id: z.string(),
+        field_data: z.array(z.object({ name: z.string(), values: z.array(z.string()).min(1) })),
+      },
+      annotations: { ...CREATE },
+    },
+    async ({ form_id, field_data }) => {
+      const id = validateMetaId(form_id, "lead_form");
+      const form = await metaApiClient.get<{ page_id?: string }>(`/${id}`, { fields: "page_id" });
+      if (!form.page_id) throw new Error(`Could not determine the Page for lead form ${id}.`);
+      const result = await withPageToken(form.page_id, () =>
+        metaApiClient.postForm<{ id: string }>(`/${id}/test_leads`, { field_data: JSON.stringify(field_data) }),
+      );
+      return { content: [{ type: "text", text: `Test lead created: ${result.id}` }, { type: "text", text: JSON.stringify(result, null, 2) }] };
+    },
+  );
+
+  server.registerTool(
+    "ads_validate_lead_delivery",
+    {
+      description: "Validate that a page has leadgen webhook subscriptions and optionally confirm a test lead is readable.",
+      inputSchema: { page_id: z.string(), test_lead_id: z.string().optional() },
+      annotations: { ...READ },
+    },
+    async ({ page_id, test_lead_id }) => {
+      const pageId = validateMetaId(page_id, "page");
+      const subscriptions = await withPageToken(pageId, () =>
+        metaApiClient.get<MetaApiResponse<Record<string, unknown>>>(`/${pageId}/subscribed_apps`, { fields: "id,name,subscribed_fields" }),
+      );
+      const leadgenSubscriptions = (subscriptions.data ?? []).filter((entry) =>
+        Array.isArray(entry["subscribed_fields"]) && (entry["subscribed_fields"] as unknown[]).includes("leadgen"),
+      );
+      let testLead: unknown;
+      if (test_lead_id) {
+        testLead = await withPageToken(pageId, () => metaApiClient.get(`/${validateMetaId(test_lead_id, "lead")}`, { fields: "id,created_time,field_data" }));
+      }
+      const result = { ok: leadgenSubscriptions.length > 0 && (!test_lead_id || Boolean(testLead)), subscriptions: leadgenSubscriptions, test_lead: testLead };
+      return { content: [{ type: "text", text: result.ok ? "Lead delivery prerequisites are valid." : "Lead delivery is not fully configured." }, { type: "text", text: JSON.stringify(result, null, 2) }] };
     },
   );
 }

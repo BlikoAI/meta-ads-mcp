@@ -12,10 +12,10 @@ describe("registerLeadTools", () => {
     vi.restoreAllMocks();
   });
 
-  it("registers exactly 4 tools", () => {
+  it("registers exactly 8 tools", () => {
     const server = createMockMcpServer();
     registerLeadTools(server as never);
-    expect(server.registerTool).toHaveBeenCalledTimes(4);
+    expect(server.registerTool).toHaveBeenCalledTimes(8);
   });
 
   it("registers tools with correct names", () => {
@@ -27,6 +27,10 @@ describe("registerLeadTools", () => {
       "ads_get_leads",
       "ads_get_ad_leads",
       "ads_create_lead_form",
+      "ads_clone_lead_form",
+      "ads_archive_lead_form",
+      "ads_create_test_lead",
+      "ads_validate_lead_delivery",
     ]);
   });
 
@@ -46,7 +50,9 @@ describe("registerLeadTools", () => {
         ],
       };
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockFetchResponse(mockData)));
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ access_token: "page-token" }))
+        .mockResolvedValueOnce(mockFetchResponse(mockData)));
 
       const handler = server._registeredTools[0].handler;
       const result = await handler({
@@ -79,7 +85,10 @@ describe("registerLeadTools", () => {
         ],
       };
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockFetchResponse(mockData)));
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ page_id: "60123" }))
+        .mockResolvedValueOnce(mockFetchResponse({ access_token: "page-token" }))
+        .mockResolvedValueOnce(mockFetchResponse(mockData)));
 
       const handler = server._registeredTools[1].handler;
       const result = await handler({
@@ -97,7 +106,10 @@ describe("registerLeadTools", () => {
       const server = createMockMcpServer();
       registerLeadTools(server as never);
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockFetchResponse({ data: [] })));
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ page_id: "60123" }))
+        .mockResolvedValueOnce(mockFetchResponse({ access_token: "page-token" }))
+        .mockResolvedValueOnce(mockFetchResponse({ data: [] })));
 
       const handler = server._registeredTools[1].handler;
       const result = await handler({
@@ -116,7 +128,9 @@ describe("registerLeadTools", () => {
       const server = createMockMcpServer();
       registerLeadTools(server as never);
 
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockFetchResponse({ id: "50001" })));
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ access_token: "page-token" }))
+        .mockResolvedValueOnce(mockFetchResponse({ id: "50001" })));
 
       const handler = server._registeredTools[3].handler;
       const result = await handler({

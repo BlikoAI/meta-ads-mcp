@@ -35,6 +35,8 @@ import { registerWhatsAppTools } from "./whatsapp.js";
 import { registerWhatsAppTemplateTools } from "./whatsapp-templates.js";
 import { registerWhatsAppFlowTools } from "./whatsapp-flows.js";
 import { registerWhatsAppConfigTools } from "./whatsapp-config.js";
+import { registerAssetUploadTools } from "./asset-uploads.js";
+import { registerPublishBundleTools } from "./publish-bundles.js";
 
 /**
  * Register all Meta Ads tools on the MCP server.
@@ -61,6 +63,8 @@ export function registerAllTools(server: McpServer): void {
   registerInsightsViewTools(server); // 5 tools — semantic insight views
   registerTargetingTools(server);    // 7 tools
   registerBudgetTools(server);       // 1 tool
+  registerAssetUploadTools(server);  // 5 tools — resumable local assets
+  registerPublishBundleTools(server); // 8 tools — safe plan/apply publishing and activation
 
   // ─── Extended Features ──────────────────────────────────
   registerLeadTools(server);         // 4 tools — Lead forms & lead download

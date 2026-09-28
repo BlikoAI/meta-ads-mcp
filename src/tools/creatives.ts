@@ -15,6 +15,8 @@ import { logger } from "../utils/logger.js";
 import { assertSafePublicUrl, UnsafeUrlError } from "../utils/url-guard.js";
 import { downloadSafePublicImage } from "../utils/safe-download.js";
 import { READ, CREATE, UPDATE, UPLOAD, WRITE_WARNING } from "./_register.js";
+import { assetFilename, readAssetBytes } from "../bliko/assets.js";
+import { atomicWriteJson, readJson, recordPath } from "../bliko/persistence.js";
 
 export const ctaEnum = z.enum([
   // Core actions
@@ -245,13 +247,30 @@ export function registerCreativeTools(server: McpServer): void {
         description: z.string().optional().describe("Description text (shown below headline)"),
         call_to_action_type: ctaEnum.optional().describe("Call-to-action button type"),
         url_tags: z.string().optional().describe("Query string params appended to URLs clicked from the ad (e.g. 'utm_source=meta&utm_medium=paid')"),
+        destination: z.discriminatedUnion("type", [
+          z.object({ type: z.literal("website"), url: z.string().url() }),
+          z.object({ type: z.literal("lead_form"), lead_gen_form_id: z.string(), fallback_url: z.string().url().optional() }),
+        ]).optional().describe("Typed destination. Prefer this over link_url for new integrations."),
+        carousel_cards: z.array(z.object({
+          image_hash: z.string().optional(),
+          video_id: z.string().optional(),
+          headline: z.string().optional(),
+          description: z.string().optional(),
+          link_url: z.string().url().optional(),
+        }).refine((card) => Boolean(card.image_hash) !== Boolean(card.video_id), "Each card needs exactly one image_hash or video_id." )).min(2).max(10).optional(),
+        creative_enhancements: z.enum(["OFF", "STANDARD"]).default("OFF"),
+        placement_assets: z.object({
+          feed: z.object({ image_hash: z.string().optional(), video_id: z.string().optional() }).optional(),
+          stories: z.object({ image_hash: z.string().optional(), video_id: z.string().optional() }).optional(),
+          reels: z.object({ image_hash: z.string().optional(), video_id: z.string().optional() }).optional(),
+        }).optional(),
       },
       annotations: { ...CREATE },
     },
     async ({
       account_id, name, page_id, object_story_id, instagram_actor_id, source_instagram_media_id,
       image_hash, image_url, video_id, link_url, message, headline, description,
-      call_to_action_type, url_tags,
+      call_to_action_type, url_tags, destination, carousel_cards, creative_enhancements = "OFF", placement_assets,
     }) => {
       const accountPath = normalizeAccountId(account_id);
       const pageIdValidated = page_id ? validateMetaId(page_id, "page") : undefined;
@@ -269,6 +288,14 @@ export function registerCreativeTools(server: McpServer): void {
         : undefined;
 
       const body: Record<string, string | number | boolean> = { name };
+      const resolvedLinkUrl = destination?.type === "website"
+        ? destination.url
+        : destination?.type === "lead_form"
+          ? destination.fallback_url ?? link_url
+          : link_url;
+      const leadGenFormId = destination?.type === "lead_form"
+        ? validateMetaId(destination.lead_gen_form_id, "lead_form")
+        : undefined;
 
       if (sourceInstagramMediaIdValidated) {
         body.source_instagram_media_id = sourceInstagramMediaIdValidated;
@@ -277,7 +304,7 @@ export function registerCreativeTools(server: McpServer): void {
         if (call_to_action_type) {
           body.call_to_action = JSON.stringify({
             type: call_to_action_type,
-            value: link_url ? { link: link_url } : undefined,
+            value: resolvedLinkUrl ? { link: resolvedLinkUrl } : undefined,
           });
         }
       } else if (objectStoryIdValidated) {
@@ -287,7 +314,7 @@ export function registerCreativeTools(server: McpServer): void {
         if (!pageIdValidated) {
           throw new Error("page_id is required when building a creative from scratch (no object_story_id or source_instagram_media_id provided).");
         }
-        if (videoIdValidated && !image_hash && !image_url) {
+        if (videoIdValidated && !image_hash && !image_url && !placement_assets) {
           throw new Error("video creatives built from scratch require image_hash or image_url as a thumbnail.");
         }
         if (image_url && !image_hash) {
@@ -302,16 +329,40 @@ export function registerCreativeTools(server: McpServer): void {
         }
         const objectStorySpec: Record<string, unknown> = { page_id: pageIdValidated };
 
-        if (videoIdValidated) {
+        if (carousel_cards) {
+          const childAttachments = carousel_cards.map((card) => ({
+            ...(card.image_hash ? { image_hash: card.image_hash } : { video_id: validateMetaId(card.video_id as string, "video") }),
+            ...(card.headline ? { name: card.headline } : {}),
+            ...(card.description ? { description: card.description } : {}),
+            ...(card.link_url ?? resolvedLinkUrl ? { link: card.link_url ?? resolvedLinkUrl } : {}),
+            call_to_action: call_to_action_type || leadGenFormId ? {
+              type: call_to_action_type ?? "SIGN_UP",
+              value: {
+                ...(card.link_url ?? resolvedLinkUrl ? { link: card.link_url ?? resolvedLinkUrl } : {}),
+                ...(leadGenFormId ? { lead_gen_form_id: leadGenFormId } : {}),
+              },
+            } : undefined,
+          }));
+          objectStorySpec.link_data = {
+            message,
+            link: resolvedLinkUrl,
+            child_attachments: childAttachments,
+            multi_share_optimized: false,
+            multi_share_end_card: false,
+          };
+        } else if (videoIdValidated) {
           const videoData: Record<string, unknown> = { video_id: videoIdValidated };
           if (message) videoData.message = message;
           if (image_hash) videoData.image_hash = image_hash;
           if (image_url && !image_hash) videoData.image_url = image_url;
           if (headline) videoData.title = headline;
-          if (call_to_action_type || link_url) {
+          if (call_to_action_type || resolvedLinkUrl || leadGenFormId) {
             videoData.call_to_action = {
-              type: call_to_action_type ?? "LEARN_MORE",
-              value: link_url ? { link: link_url } : undefined,
+              type: call_to_action_type ?? (leadGenFormId ? "SIGN_UP" : "LEARN_MORE"),
+              value: {
+                ...(resolvedLinkUrl ? { link: resolvedLinkUrl } : {}),
+                ...(leadGenFormId ? { lead_gen_form_id: leadGenFormId } : {}),
+              },
             };
           }
           objectStorySpec.video_data = videoData;
@@ -319,14 +370,17 @@ export function registerCreativeTools(server: McpServer): void {
           const linkData: Record<string, unknown> = {};
           if (image_hash) linkData.image_hash = image_hash;
           if (image_url && !image_hash) linkData.picture = image_url;
-          if (link_url) linkData.link = link_url;
+          if (resolvedLinkUrl) linkData.link = resolvedLinkUrl;
           if (message) linkData.message = message;
           if (headline) linkData.name = headline;
           if (description) linkData.description = description;
-          if (call_to_action_type) {
+          if (call_to_action_type || leadGenFormId) {
             linkData.call_to_action = {
-              type: call_to_action_type,
-              value: link_url ? { link: link_url } : undefined,
+              type: call_to_action_type ?? "SIGN_UP",
+              value: {
+                ...(resolvedLinkUrl ? { link: resolvedLinkUrl } : {}),
+                ...(leadGenFormId ? { lead_gen_form_id: leadGenFormId } : {}),
+              },
             };
           }
           objectStorySpec.link_data = linkData;
@@ -340,6 +394,32 @@ export function registerCreativeTools(server: McpServer): void {
       }
 
       if (url_tags) body.url_tags = url_tags;
+      body.degrees_of_freedom_spec = JSON.stringify({
+        creative_features_spec: {
+          standard_enhancements: { enroll_status: creative_enhancements === "STANDARD" ? "OPT_IN" : "OPT_OUT" },
+        },
+      });
+      if (placement_assets) {
+        const images: unknown[] = [];
+        const videos: unknown[] = [];
+        const assetCustomizationRules: unknown[] = [];
+        const placements = {
+          feed: { publisher_platforms: ["facebook", "instagram"], facebook_positions: ["feed"], instagram_positions: ["stream"] },
+          stories: { publisher_platforms: ["facebook", "instagram"], facebook_positions: ["story"], instagram_positions: ["story"] },
+          reels: { publisher_platforms: ["facebook", "instagram"], facebook_positions: ["facebook_reels"], instagram_positions: ["reels"] },
+        } as const;
+        for (const [placement, asset] of Object.entries(placement_assets)) {
+          if (!asset) continue;
+          const label = { name: `bliko_${placement}` };
+          if (asset.image_hash) images.push({ hash: asset.image_hash, adlabels: [label] });
+          if (asset.video_id) videos.push({ video_id: validateMetaId(asset.video_id, "video"), adlabels: [label] });
+          assetCustomizationRules.push({
+            customization_spec: placements[placement as keyof typeof placements],
+            ...(asset.image_hash ? { image_label: label } : { video_label: label }),
+          });
+        }
+        body.asset_feed_spec = JSON.stringify({ images, videos, asset_customization_rules: assetCustomizationRules });
+      }
 
       const result = await metaApiClient.postForm<{ id: string }>(
         `/${accountPath}/adcreatives`,
@@ -407,28 +487,41 @@ export function registerCreativeTools(server: McpServer): void {
       description: `${WRITE_WARNING}Upload an image to Meta for use in ad creatives. Provide an image URL — the server will download and upload it to Meta. Returns an image hash for use in ads_create_ad_creative.`,
       inputSchema: {
         account_id: z.string().describe("Ad account ID"),
-        image_url: z.string().describe("URL of the image to upload"),
+        image_url: z.string().optional().describe("Public URL of the image to upload"),
+        upload_id: z.string().uuid().optional().describe("Ready local upload from ads_finalize_asset_upload"),
         name: z.string().optional().describe("Optional name for the image"),
       },
       annotations: { ...UPLOAD },
     },
-    async ({ account_id, image_url, name }) => {
+    async ({ account_id, image_url, upload_id, name }) => {
       const id = normalizeAccountId(account_id);
 
+      if (Boolean(image_url) === Boolean(upload_id)) {
+        throw new Error("Provide exactly one of image_url or upload_id.");
+      }
+
       try {
-        const downloaded = await downloadSafePublicImage(image_url);
-        logger.info(
-          { imageHost: downloaded.finalUrl.hostname, bytes: downloaded.buffer.length },
-          "Downloaded image for upload",
-        );
+        const local = upload_id ? await readAssetBytes(upload_id) : undefined;
+        if (local && !local.manifest.mime_type.startsWith("image/")) throw new Error("upload_id is not an image.");
+        const downloaded = image_url ? await downloadSafePublicImage(image_url) : undefined;
+        const bytes = local?.bytes ?? downloaded?.buffer;
+        const contentType = local?.manifest.mime_type ?? downloaded?.contentType;
+        const filename = local ? assetFilename(local.manifest) : `image${downloaded?.extension ?? ""}`;
+        if (!bytes || !contentType) throw new Error("Image bytes could not be resolved.");
+        const dedupeKey = local ? `${id}:image:${local.manifest.actual_sha256}` : undefined;
+        const cached = dedupeKey ? await readJson<{ hash: string; url: string; name?: string }>(recordPath("dedupe", dedupeKey)) : undefined;
+        if (cached) {
+          return { content: [{ type: "text", text: `Image already uploaded; reused existing Meta asset.\nHash: ${cached.hash}\nURL: ${cached.url}\nName: ${cached.name ?? name ?? "N/A"}` }] };
+        }
+        logger.info({ bytes: bytes.length, uploadId: upload_id }, "Resolved image for upload");
 
         const formData = new FormData();
-        const imageBytes = new Uint8Array(downloaded.buffer.length);
-        imageBytes.set(downloaded.buffer);
+        const imageBytes = new Uint8Array(bytes.length);
+        imageBytes.set(bytes);
         formData.set(
           "filename",
-          new Blob([imageBytes], { type: downloaded.contentType }),
-          `image${downloaded.extension}`,
+          new Blob([imageBytes], { type: contentType }),
+          filename,
         );
         if (name) formData.set("name", name);
 
@@ -443,6 +536,7 @@ export function registerCreativeTools(server: McpServer): void {
         if (!uploaded) {
           throw new Error("Image upload failed — no image hash returned.");
         }
+        if (dedupeKey) await atomicWriteJson(recordPath("dedupe", dedupeKey), uploaded);
 
         return {
           content: [
@@ -607,7 +701,8 @@ export function registerCreativeTools(server: McpServer): void {
       description: `${WRITE_WARNING}Upload a video to Meta for use in ad creatives. Provide either a public video URL (file_url) or an Instagram media ID (source_instagram_media_id) to upload directly from IG. Returns a video_id for use in ads_create_ad_creative. Useful for promoting Instagram Reels.`,
       inputSchema: {
         account_id: z.string().describe("Ad account ID"),
-        file_url: z.string().optional().describe("Public URL of the video file (MP4). Required unless source_instagram_media_id is provided. Can be an Instagram Reel media_url."),
+        file_url: z.string().optional().describe("Public URL of the video file (MP4)."),
+        upload_id: z.string().uuid().optional().describe("Ready local video upload from ads_finalize_asset_upload"),
         source_instagram_media_id: z.string().optional().describe("Instagram media ID (V2) to upload an IG video directly to the ad library. Alternative to file_url — simplifies the Reel promotion flow."),
         name: z.string().optional().describe("Name of the video in the ad library (for organization). Different from title."),
         title: z.string().optional().describe("Title for the video"),
@@ -615,10 +710,33 @@ export function registerCreativeTools(server: McpServer): void {
       },
       annotations: { ...UPLOAD },
     },
-    async ({ account_id, file_url, source_instagram_media_id, name, title, description }) => {
+    async ({ account_id, file_url, upload_id, source_instagram_media_id, name, title, description }) => {
       const id = normalizeAccountId(account_id);
 
       const body: Record<string, string | number | boolean> = {};
+
+      const sourceCount = [file_url, upload_id, source_instagram_media_id].filter(Boolean).length;
+      if (sourceCount !== 1) throw new Error("Provide exactly one of file_url, upload_id or source_instagram_media_id.");
+
+      if (upload_id) {
+        const local = await readAssetBytes(upload_id);
+        if (!local.manifest.mime_type.startsWith("video/")) throw new Error("upload_id is not a video.");
+        const dedupeKey = `${id}:video:${local.manifest.actual_sha256}`;
+        const cached = await readJson<{ id: string }>(recordPath("dedupe", dedupeKey));
+        if (cached) {
+          return { content: [{ type: "text", text: `Video already uploaded; reused existing Meta asset.\nID: ${cached.id}` }] };
+        }
+        const formData = new FormData();
+        const data = new Uint8Array(local.bytes.length);
+        data.set(local.bytes);
+        formData.set("source", new Blob([data], { type: local.manifest.mime_type }), assetFilename(local.manifest));
+        if (name) formData.set("name", name);
+        if (title) formData.set("title", title);
+        if (description) formData.set("description", description);
+        const result = await metaApiClient.postMultipart<{ id: string }>(`/${id}/advideos`, formData);
+        await atomicWriteJson(recordPath("dedupe", dedupeKey), result);
+        return { content: [{ type: "text", text: `Video uploaded successfully!\nID: ${result.id}\nValidated locally: yes\nHas audio: ${local.manifest.probe?.has_audio ? "yes" : "no"}` }] };
+      }
 
       if (source_instagram_media_id) {
         body.source_instagram_media_id = source_instagram_media_id;

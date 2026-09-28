@@ -1,7 +1,7 @@
 {
   "name": "@byadsco/meta-ads-mcp",
-  "version": "4.0.0",
-  "description": "MCP server for Meta Ads (Facebook/Instagram) management - agency multi-account",
+  "version": "4.1.0-bliko.1",
+  "description": "Bliko fork of Meta Ads MCP with safe end-to-end campaign publishing",
   "author": {
     "name": "Santiago Bastidas",
     "email": "dev@byads.co",
@@ -105,9 +105,9 @@
   "homepage": "https://github.com/byadsco/meta-ads-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/byadsco/meta-ads-mcp.git"
+    "url": "git+https://github.com/BlikoAI/meta-ads-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/byadsco/meta-ads-mcp/issues"
+    "url": "https://github.com/BlikoAI/meta-ads-mcp/issues"
   }
 }

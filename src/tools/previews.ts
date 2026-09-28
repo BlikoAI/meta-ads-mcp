@@ -119,9 +119,16 @@ export function registerPreviewTools(server: McpServer): void {
                     call_to_action: z
                       .object({
                         type: z.string(),
-                        value: z.object({ link: z.string().optional() }).optional(),
+                        value: z.object({ link: z.string().optional(), lead_gen_form_id: z.string().optional() }).optional(),
                       })
                       .optional(),
+                    child_attachments: z.array(z.object({
+                      image_hash: z.string().optional(), video_id: z.string().optional(), picture: z.string().optional(),
+                      link: z.string().optional(), name: z.string().optional(), description: z.string().optional(),
+                      call_to_action: z.object({ type: z.string(), value: z.record(z.string(), z.unknown()).optional() }).optional(),
+                    })).optional(),
+                    multi_share_optimized: z.boolean().optional(),
+                    multi_share_end_card: z.boolean().optional(),
                   })
                   .optional(),
                 video_data: z
@@ -134,13 +141,16 @@ export function registerPreviewTools(server: McpServer): void {
                     call_to_action: z
                       .object({
                         type: z.string(),
-                        value: z.object({ link: z.string().optional() }).optional(),
+                        value: z.object({ link: z.string().optional(), lead_gen_form_id: z.string().optional() }).optional(),
                       })
                       .optional(),
                   })
                   .optional(),
               })
-              .describe("Creative story spec"),
+              .passthrough()
+              .describe("Creative story spec, including lead forms and carousel child_attachments"),
+            asset_feed_spec: z.record(z.string(), z.unknown()).optional().describe("Optional placement-personalized asset feed"),
+            degrees_of_freedom_spec: z.record(z.string(), z.unknown()).optional(),
           })
           .describe("Creative specification"),
       },

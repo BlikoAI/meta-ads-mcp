@@ -45,6 +45,25 @@ export function createServer(): McpServer {
     { instructions: SERVER_INSTRUCTIONS },
   );
 
+  // The public Bliko endpoint exposes every read plus only the guarded writes
+  // required for plan/apply publishing. A separate private instance runs with
+  // MCP_TOOL_PROFILE=admin for backwards-compatible access to all tools.
+  if (process.env["MCP_TOOL_PROFILE"] === "safe") {
+    const guardedWrites = new Set([
+      "ads_begin_asset_upload", "ads_upload_asset_chunk", "ads_finalize_asset_upload", "ads_delete_asset_upload",
+      "ads_apply_publish_bundle", "ads_apply_activate_bundle", "ads_pause_publish_bundle",
+      "ads_create_test_lead",
+    ]);
+    const original = server.registerTool.bind(server);
+    server.registerTool = ((name: string, config: { annotations?: { readOnlyHint?: boolean } }, handler: unknown) => {
+      if (config.annotations?.readOnlyHint === true || guardedWrites.has(name)) {
+        return original(name, config as never, handler as never);
+      }
+      logger.debug({ event: "safe_profile_tool_hidden", tool: name }, "Tool hidden by safe profile");
+      return undefined as never;
+    }) as typeof server.registerTool;
+  }
+
   registerAllTools(server);
   registerSkillPrompts(server);
   registerSkillResources(server);
