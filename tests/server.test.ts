@@ -45,6 +45,23 @@ describe("createServer", () => {
 });
 
 describe("published tool schemas", () => {
+  it("publishes only reads and guarded writes in the safe profile", async () => {
+    const previous = process.env.MCP_TOOL_PROFILE;
+    process.env.MCP_TOOL_PROFILE = "safe";
+    try {
+      const tools = await listPublishedTools();
+      expect(tools).toHaveLength(94);
+      expect(tools.map((tool) => tool.name)).toContain("ads_apply_publish_bundle");
+      expect(tools.map((tool) => tool.name)).toContain("ads_apply_activate_bundle");
+      expect(tools.map((tool) => tool.name)).not.toContain("ads_activate_entity");
+      expect(tools.map((tool) => tool.name)).not.toContain("ads_delete_campaign");
+      expect(tools.map((tool) => tool.name)).not.toContain("whatsapp_create_template");
+    } finally {
+      if (previous === undefined) delete process.env.MCP_TOOL_PROFILE;
+      else process.env.MCP_TOOL_PROFILE = previous;
+    }
+  });
+
   // Gemini's function_declarations reject empty enums and empty/null enum
   // members; one bad member takes down every request for clients with this
   // server attached, so the wire-level schemas must never publish one.
