@@ -66,12 +66,16 @@ type PublishSpec = z.infer<typeof publishSpecSchema>;
 interface PublishPlan { plan_id: string; hash: string; created_at: string; expires_at: string; spec: PublishSpec; total_daily_budget: number; warnings: string[]; blockers: string[]; applied_bundle_id?: string }
 interface BundleResources { campaign_id?: string; form_id?: string; ad_set_ids: Record<string, string>; creative_ids: Record<string, string>; ad_ids: Record<string, string>; image_hashes: string[]; video_ids: string[] }
 interface PublishBundle { bundle_id: string; plan_id: string; hash: string; state: "applying" | "paused" | "failed" | "active"; resources: BundleResources; created_at: string; updated_at: string; error?: string; verification?: unknown }
-interface ActivationPlan { plan_id: string; bundle_id: string; bundle_hash: string; created_at: string; expires_at: string; blockers: string[]; warnings: string[]; applied: boolean }
+interface ActivationPlan { plan_id: string; bundle_id: string; bundle_hash: string; created_at: string; expires_at: string; blockers: string[]; warnings: string[]; applied: boolean; applying?: boolean }
 
 function result(summary: string, value: unknown) {
   return { content: [{ type: "text" as const, text: summary }, { type: "text" as const, text: JSON.stringify(value, null, 2) }] };
 }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function uuidFromHash(hash: string): string {
+  const hex = hash.slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 async function preflight(spec: Pick<PublishSpec, "account_id" | "page_id" | "instagram_actor_id" | "pixel_id"> & { form_id?: string }) {
   const accountId = normalizeAccountId(spec.account_id);
@@ -220,7 +224,7 @@ export function registerPublishBundleTools(server: McpServer): void {
     const check = await preflight({ ...parsed, form_id: formId });
     const now = Date.now();
     const plan: PublishPlan = {
-      plan_id: randomUUID(), hash: digest, created_at: new Date(now).toISOString(), expires_at: new Date(now + 24 * 60 * 60_000).toISOString(),
+      plan_id: uuidFromHash(sha256(`${accountId}:${parsed.idempotency_key}`)), hash: digest, created_at: new Date(now).toISOString(), expires_at: new Date(now + 24 * 60 * 60_000).toISOString(),
       spec: parsed, total_daily_budget: parsed.campaign.daily_budget ?? parsed.ad_sets.reduce((sum, item) => sum + (item.daily_budget ?? 0), 0),
       warnings: check.warnings, blockers: check.blockers,
     };
@@ -249,6 +253,10 @@ export function registerPublishBundleTools(server: McpServer): void {
     const now = new Date().toISOString();
     const bundle: PublishBundle = { bundle_id: randomUUID(), plan_id, hash: plan.hash, state: "applying", resources: { ad_set_ids: {}, creative_ids: {}, ad_ids: {}, image_hashes: [], video_ids: [] }, created_at: now, updated_at: now };
     await atomicWriteJson(recordPath("bundles", bundle.bundle_id), bundle);
+    // Claim the immutable plan before the first Meta mutation. A retry after a
+    // crash returns this manifest instead of minting a second campaign.
+    plan.applied_bundle_id = bundle.bundle_id;
+    await atomicWriteJson(recordPath("plans", plan.plan_id), plan);
     try {
       if (spec.lead_form?.mode === "create") bundle.resources.form_id = await createLeadForm(pageId, spec.lead_form);
       else if (spec.lead_form?.mode === "existing") bundle.resources.form_id = validateMetaId(spec.lead_form.form_id, "lead_form");
@@ -297,7 +305,6 @@ export function registerPublishBundleTools(server: McpServer): void {
       bundle.verification = { campaign: campaignRead, children };
       bundle.state = "paused";
       bundle.updated_at = new Date().toISOString();
-      plan.applied_bundle_id = bundle.bundle_id;
       await atomicWriteJson(recordPath("bundles", bundle.bundle_id), bundle);
       await atomicWriteJson(recordPath("plans", plan.plan_id), plan);
       await appendAudit({ action: "apply_publish_bundle", plan_id, bundle_id: bundle.bundle_id, account_id: accountId, resources: bundle.resources, result: "paused" });
@@ -370,17 +377,20 @@ export function registerPublishBundleTools(server: McpServer): void {
       const bundle = await readJson<PublishBundle>(recordPath("bundles", plan.bundle_id));
       return result(`Activation plan ${plan_id} was already applied.`, bundle);
     }
+    if (plan.applying) throw new Error(`Activation plan ${plan_id} is already being applied.`);
     if (Date.parse(plan.expires_at) < Date.now()) throw new Error(`Activation plan ${plan_id} has expired.`);
     if (plan.blockers.length) throw new Error(`Activation plan is blocked: ${plan.blockers.join(" ")}`);
     const bundle = await readJson<PublishBundle>(recordPath("bundles", plan.bundle_id));
     if (!bundle || bundle.hash !== plan.bundle_hash) throw new Error("Bundle missing or integrity check failed.");
     const activated: string[] = [];
+    plan.applying = true;
+    await atomicWriteJson(recordPath("activation-plans", plan.plan_id), plan);
     try {
       for (const id of Object.values(bundle.resources.ad_ids)) { await metaApiClient.postForm(`/${id}`, { status: "ACTIVE" }); activated.push(id); }
       for (const id of Object.values(bundle.resources.ad_set_ids)) { await metaApiClient.postForm(`/${id}`, { status: "ACTIVE" }); activated.push(id); }
       if (!bundle.resources.campaign_id) throw new Error("Bundle has no campaign ID.");
       await metaApiClient.postForm(`/${bundle.resources.campaign_id}`, { status: "ACTIVE" }); activated.push(bundle.resources.campaign_id);
-      plan.applied = true; bundle.state = "active"; bundle.updated_at = new Date().toISOString();
+      plan.applied = true; plan.applying = false; bundle.state = "active"; bundle.updated_at = new Date().toISOString();
       await atomicWriteJson(recordPath("activation-plans", plan.plan_id), plan);
       await atomicWriteJson(recordPath("bundles", bundle.bundle_id), bundle);
       await appendAudit({ action: "apply_activate_bundle", activation_plan_id: plan_id, bundle_id: bundle.bundle_id, activated });
@@ -391,6 +401,8 @@ export function registerPublishBundleTools(server: McpServer): void {
         try { await metaApiClient.postForm(`/${id}`, { status: "PAUSED" }); }
         catch (rollbackError) { rollbackErrors.push(`${id}: ${errorText(rollbackError)}`); }
       }
+      plan.applying = false;
+      await atomicWriteJson(recordPath("activation-plans", plan.plan_id), plan);
       throw new Error(`Activation failed and was rolled back to PAUSED: ${errorText(error)}. Rollback errors: ${rollbackErrors.join("; ") || "none"}.`);
     }
   });
