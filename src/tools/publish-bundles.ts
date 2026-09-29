@@ -57,11 +57,25 @@ export const publishSpecSchema = z.object({
   campaign: z.object({
     name: z.string().min(1), objective: objectiveSchema, special_ad_categories: z.array(z.string()).default(["NONE"]),
     daily_budget: z.number().int().positive().optional(), lifetime_budget: z.number().int().positive().optional(),
-    bid_strategy: z.string().default("LOWEST_COST_WITHOUT_CAP"), buying_type: z.literal("AUCTION").default("AUCTION"),
+    bid_strategy: z.string().optional(), buying_type: z.literal("AUCTION").default("AUCTION"),
   }),
   lead_form: leadFormSchema.optional(), ad_sets: z.array(adSetSchema).min(1), idempotency_key: z.string().min(8).max(200),
 });
 type PublishSpec = z.infer<typeof publishSpecSchema>;
+
+export function normalizeBidStrategies(spec: PublishSpec): PublishSpec {
+  const campaignHasBudget = Boolean(spec.campaign.daily_budget || spec.campaign.lifetime_budget);
+  if (campaignHasBudget) {
+    spec.campaign.bid_strategy ??= "LOWEST_COST_WITHOUT_CAP";
+  } else {
+    if (spec.campaign.bid_strategy) throw new Error("Campaign bid_strategy requires a campaign budget; use ad set bid_strategy for ad set budgets.");
+    for (const adSet of spec.ad_sets) {
+      if (!adSet.daily_budget && !adSet.lifetime_budget) throw new Error(`Ad set ${adSet.key} needs a budget when the campaign has none.`);
+      adSet.bid_strategy ??= "LOWEST_COST_WITHOUT_CAP";
+    }
+  }
+  return spec;
+}
 
 interface PublishPlan { plan_id: string; hash: string; created_at: string; expires_at: string; spec: PublishSpec; total_daily_budget: number; warnings: string[]; blockers: string[]; applied_bundle_id?: string }
 interface BundleResources { campaign_id?: string; form_id?: string; ad_set_ids: Record<string, string>; creative_ids: Record<string, string>; ad_ids: Record<string, string>; image_hashes: string[]; video_ids: string[] }
@@ -205,7 +219,7 @@ export function registerPublishBundleTools(server: McpServer): void {
     inputSchema: { spec: publishSpecSchema }, annotations: { ...READ },
   }, async ({ spec }) => {
     await ensureDataDirectories();
-    const parsed = publishSpecSchema.parse(spec);
+    const parsed = normalizeBidStrategies(publishSpecSchema.parse(spec));
     const accountId = normalizeAccountId(parsed.account_id);
     const digest = sha256(stableJson(parsed));
     const keyPath = recordPath("dedupe", `publish-plan:${accountId}:${parsed.idempotency_key}`);
