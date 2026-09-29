@@ -146,14 +146,17 @@ async function buildCreativeBody(spec: PublishSpec, ad: z.infer<typeof adSchema>
   const destinationUrl = ad.destination.type === "website" ? ad.destination.url : undefined;
   if (destinationUrl) await assertSafePublicUrl(destinationUrl);
   if (ad.destination.type === "lead_form" && !formId) throw new Error(`Ad ${ad.key} needs lead_form but none was supplied.`);
-  const ctaValue = { ...(destinationUrl ? { link: destinationUrl } : {}), ...(formId && ad.destination.type === "lead_form" ? { lead_gen_form_id: formId } : {}) };
+  // Meta requires a link even for on-Facebook lead forms. Existing Lead Ads
+  // use fb.me as the placeholder; the form ID determines the real destination.
+  const linkUrl = destinationUrl ?? "http://fb.me/";
+  const ctaValue = { link: linkUrl, ...(formId && ad.destination.type === "lead_form" ? { lead_gen_form_id: formId } : {}) };
   const callToAction = { type: ad.call_to_action_type, value: ctaValue };
   const story: Record<string, unknown> = { page_id: pageId };
   if (ad.instagram_actor_id ?? spec.instagram_actor_id) story.instagram_actor_id = validateMetaId(ad.instagram_actor_id ?? spec.instagram_actor_id!, "instagram");
   if (ad.media.type === "image") {
     const asset = await resolveAsset(accountId, ad.media, `${ad.name} image`);
     if (asset.image_hash) resources.image_hashes.push(asset.image_hash);
-    story.link_data = { image_hash: asset.image_hash, link: destinationUrl, message: ad.message, name: ad.headline, description: ad.description, call_to_action: callToAction };
+    story.link_data = { image_hash: asset.image_hash, link: linkUrl, message: ad.message, name: ad.headline, description: ad.description, call_to_action: callToAction };
   } else if (ad.media.type === "video") {
     const asset = await resolveAsset(accountId, ad.media, `${ad.name} video`);
     if (!asset.video_id) throw new Error(`Video asset missing for ${ad.name}.`);
@@ -168,9 +171,9 @@ async function buildCreativeBody(spec: PublishSpec, ad: z.infer<typeof adSchema>
       const asset = await resolveAsset(accountId, card, `${ad.name} card ${index + 1}`);
       if (asset.image_hash) resources.image_hashes.push(asset.image_hash);
       if (asset.video_id) resources.video_ids.push(asset.video_id);
-      children.push({ ...asset, link: card.link_url ?? destinationUrl, name: card.headline, description: card.description, call_to_action: { ...callToAction, value: { ...ctaValue, ...(card.link_url ? { link: card.link_url } : {}) } } });
+      children.push({ ...asset, link: card.link_url ?? linkUrl, name: card.headline, description: card.description, call_to_action: { ...callToAction, value: { ...ctaValue, ...(card.link_url ? { link: card.link_url } : {}) } } });
     }
-    story.link_data = { message: ad.message, link: destinationUrl, child_attachments: children, multi_share_optimized: false, multi_share_end_card: false };
+    story.link_data = { message: ad.message, link: linkUrl, child_attachments: children, multi_share_optimized: false, multi_share_end_card: false };
   }
   const body: Record<string, string | number | boolean> = {
     name: `${ad.name} creative`, object_story_spec: JSON.stringify(story),
