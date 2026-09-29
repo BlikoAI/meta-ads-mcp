@@ -57,7 +57,7 @@ export const publishSpecSchema = z.object({
   campaign: z.object({
     name: z.string().min(1), objective: objectiveSchema, special_ad_categories: z.array(z.string()).default(["NONE"]),
     daily_budget: z.number().int().positive().optional(), lifetime_budget: z.number().int().positive().optional(),
-    bid_strategy: z.string().optional(), buying_type: z.literal("AUCTION").default("AUCTION"),
+    bid_strategy: z.string().default("LOWEST_COST_WITHOUT_CAP"), buying_type: z.literal("AUCTION").default("AUCTION"),
   }),
   lead_form: leadFormSchema.optional(), ad_sets: z.array(adSetSchema).min(1), idempotency_key: z.string().min(8).max(200),
 });
