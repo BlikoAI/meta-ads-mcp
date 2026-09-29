@@ -54,9 +54,13 @@ export function createServer(): McpServer {
       "ads_apply_publish_bundle", "ads_apply_activate_bundle", "ads_pause_publish_bundle",
       "ads_create_test_lead",
     ]);
+    const hiddenReads = new Set([
+      "ads_list_tokens", "ads_get_gemini_key_status", "ads_library_get_apify_token_status",
+    ]);
     const original = server.registerTool.bind(server);
     server.registerTool = ((name: string, config: { annotations?: { readOnlyHint?: boolean } }, handler: unknown) => {
-      if (config.annotations?.readOnlyHint === true || guardedWrites.has(name)) {
+      if (!name.startsWith("whatsapp_") && !hiddenReads.has(name)
+        && (config.annotations?.readOnlyHint === true || guardedWrites.has(name))) {
         return original(name, config as never, handler as never);
       }
       logger.debug({ event: "safe_profile_tool_hidden", tool: name }, "Tool hidden by safe profile");

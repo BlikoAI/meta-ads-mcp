@@ -50,12 +50,15 @@ describe("published tool schemas", () => {
     process.env.MCP_TOOL_PROFILE = "safe";
     try {
       const tools = await listPublishedTools();
-      expect(tools).toHaveLength(94);
+      expect(tools).toHaveLength(82);
       expect(tools.map((tool) => tool.name)).toContain("ads_apply_publish_bundle");
       expect(tools.map((tool) => tool.name)).toContain("ads_apply_activate_bundle");
       expect(tools.map((tool) => tool.name)).not.toContain("ads_activate_entity");
       expect(tools.map((tool) => tool.name)).not.toContain("ads_delete_campaign");
-      expect(tools.map((tool) => tool.name)).not.toContain("whatsapp_create_template");
+      expect(tools.map((tool) => tool.name)).not.toContain("ads_list_tokens");
+      expect(tools.map((tool) => tool.name)).not.toContain("ads_get_gemini_key_status");
+      expect(tools.map((tool) => tool.name)).not.toContain("ads_library_get_apify_token_status");
+      expect(tools.every((tool) => !tool.name.startsWith("whatsapp_"))).toBe(true);
     } finally {
       if (previous === undefined) delete process.env.MCP_TOOL_PROFILE;
       else process.env.MCP_TOOL_PROFILE = previous;
