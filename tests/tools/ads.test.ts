@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { registerAdTools } from "../../src/tools/ads.js";
+import { flexibleAdSchema, registerAdTools } from "../../src/tools/ads.js";
 import { metaApiClient } from "../../src/meta/client.js";
+import { uploadLocalImage, uploadLocalVideo } from "../../src/bliko/meta-assets.js";
 import {
   createMockMcpServer,
   setupTestToken,
@@ -8,10 +9,16 @@ import {
   mockFetchResponse,
 } from "../setup.js";
 
+vi.mock("../../src/bliko/meta-assets.js", () => ({
+  uploadLocalImage: vi.fn(),
+  uploadLocalVideo: vi.fn(),
+}));
+
 type ToolResult = { content: Array<{ type: string; text: string }> };
 
 const UPDATE_AD = 3;
 const UPDATE_URL_TAGS = 4;
+const CREATE_AD = 2;
 
 function bodyOf(callIndex: number): URLSearchParams {
   const call = vi.mocked(fetch).mock.calls[callIndex];
@@ -51,6 +58,179 @@ describe("registerAdTools", () => {
   beforeEach(() => {
     setupTestToken();
     metaApiClient.resetForTests();
+    vi.mocked(uploadLocalImage).mockResolvedValue({ hash: "uploaded-image-hash", reused: false });
+    vi.mocked(uploadLocalVideo).mockResolvedValue({ id: "880099", reused: false });
+  });
+
+  describe("ads_create_ad handler", () => {
+    it("validates flexible media references", () => {
+      expect(flexibleAdSchema.safeParse({
+        page_id: "6001",
+        message: "Copy",
+        headline: "Headline",
+        destination: { type: "lead_form", lead_gen_form_id: "7001", fallback_url: "https://bliko.ai" },
+        flexible_assets: {
+          images: [{ image_hash: "i1" }],
+          videos: [{ video_id: "8001" }],
+        },
+      }).success).toBe(true);
+      expect(flexibleAdSchema.safeParse({
+        page_id: "6001",
+        message: "Copy",
+        headline: "Headline",
+        destination: { type: "lead_form", lead_gen_form_id: "7001", fallback_url: "https://bliko.ai" },
+        flexible_assets: {
+          images: [{ image_hash: "i1", upload_id: "4f8dc33c-660d-4e62-9fc2-dfa9d686418b" }],
+          videos: [{ video_id: "8001" }],
+        },
+      }).success).toBe(false);
+    });
+
+    it("creates and verifies one flexible 3+3 lead ad", async () => {
+      const server = createMockMcpServer();
+      registerAdTools(server as never);
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ id: "3009" }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          id: "3009",
+          status: "PAUSED",
+          adset_id: "2001",
+          creative: { id: "4001" },
+          creative_asset_groups_spec: {
+            groups: [{
+              images: [{ hash: "i1" }, { hash: "i2" }, { hash: "i3" }],
+              videos: [{ video_id: "8001" }, { video_id: "8002" }, { video_id: "8003" }],
+            }],
+          },
+        })));
+
+      const result = await server._registeredTools[CREATE_AD].handler({
+        account_id: "act_123",
+        name: "Flexible lead ad",
+        ad_set_id: "2001",
+        status: "PAUSED",
+        creative_id: undefined,
+        flexible_ad: {
+          page_id: "6001",
+          instagram_actor_id: "9001",
+          message: "Primary copy",
+          headline: "Headline",
+          description: "Description",
+          call_to_action_type: "LEARN_MORE",
+          destination: { type: "lead_form", lead_gen_form_id: "7001", fallback_url: "https://bliko.ai" },
+          creative_enhancements: "OFF",
+          flexible_assets: {
+            images: [{ image_hash: "i1" }, { image_hash: "i2" }, { image_hash: "i3" }],
+            videos: [{ video_id: "8001" }, { video_id: "8002" }, { video_id: "8003" }],
+          },
+        },
+      }) as ToolResult;
+
+      expect(pathOf(0)).toContain("/act_123/ads");
+      expect(bodyOf(0).get("adset_id")).toBe("2001");
+      expect(bodyOf(0).get("status")).toBe("PAUSED");
+      const creative = JSON.parse(bodyOf(0).get("creative") ?? "{}");
+      expect(creative.object_story_spec).toMatchObject({
+        page_id: "6001",
+        instagram_user_id: "9001",
+        link_data: {
+          image_hash: "i1",
+          call_to_action: {
+            type: "LEARN_MORE",
+            value: { link: "https://bliko.ai", lead_gen_form_id: "7001" },
+          },
+        },
+      });
+      expect(Object.values(creative.degrees_of_freedom_spec.creative_features_spec).every(
+        (feature) => (feature as { enroll_status: string }).enroll_status === "OPT_OUT",
+      )).toBe(true);
+      const assetGroups = JSON.parse(bodyOf(0).get("creative_asset_groups_spec") ?? "{}");
+      expect(assetGroups.groups[0].images).toHaveLength(3);
+      expect(assetGroups.groups[0].videos).toHaveLength(3);
+      expect(assetGroups.groups[0].texts).toEqual([
+        { text: "Primary copy", text_type: "primary_text" },
+        { text: "Headline", text_type: "headline" },
+        { text: "Description", text_type: "description" },
+      ]);
+      expect(result.content[0].text).toContain("3 image(s), 3 video(s)");
+    });
+
+    it("resolves staged upload IDs before creating the flexible ad", async () => {
+      const server = createMockMcpServer();
+      registerAdTools(server as never);
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ id: "3010" }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          id: "3010",
+          creative_asset_groups_spec: {
+            groups: [{
+              images: [{ hash: "uploaded-image-hash" }],
+              videos: [{ video_id: "880099" }],
+            }],
+          },
+        })));
+      const imageUploadId = "4f8dc33c-660d-4e62-9fc2-dfa9d686418b";
+      const videoUploadId = "2c48c343-68f2-4477-8520-c4d17ea4133d";
+
+      await server._registeredTools[CREATE_AD].handler({
+        account_id: "act_123",
+        name: "Flexible uploads",
+        ad_set_id: "2001",
+        status: "PAUSED",
+        flexible_ad: {
+          page_id: "6001",
+          message: "Copy",
+          headline: "Headline",
+          destination: { type: "lead_form", lead_gen_form_id: "7001", fallback_url: "https://bliko.ai" },
+          flexible_assets: {
+            images: [{ upload_id: imageUploadId }],
+            videos: [{ upload_id: videoUploadId }],
+          },
+        },
+      });
+
+      expect(uploadLocalImage).toHaveBeenCalledWith("act_123", imageUploadId, "Flexible uploads image 1");
+      expect(uploadLocalVideo).toHaveBeenCalledWith("act_123", videoUploadId, "Flexible uploads video 1");
+    });
+
+    it("deletes a flexible ad when Meta silently drops its media pool", async () => {
+      const server = createMockMcpServer();
+      registerAdTools(server as never);
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ id: "3011" }))
+        .mockResolvedValueOnce(mockFetchResponse({ id: "3011", creative_asset_groups_spec: { groups: [] } }))
+        .mockResolvedValueOnce(mockFetchResponse({ success: true })));
+
+      await expect(server._registeredTools[CREATE_AD].handler({
+        account_id: "act_123",
+        name: "Degraded",
+        ad_set_id: "2001",
+        status: "PAUSED",
+        flexible_ad: {
+          page_id: "6001",
+          message: "Copy",
+          headline: "Headline",
+          destination: { type: "lead_form", lead_gen_form_id: "7001", fallback_url: "https://bliko.ai" },
+          flexible_assets: { images: [{ image_hash: "i1" }], videos: [{ video_id: "8001" }] },
+        },
+      })).rejects.toThrow(/did not preserve/i);
+
+      expect(pathOf(2)).toMatch(/\/3011$/);
+      expect(bodyOf(2).get("status")).toBe("DELETED");
+    });
+
+    it("requires exactly one standard or flexible creative mode", async () => {
+      const server = createMockMcpServer();
+      registerAdTools(server as never);
+      vi.stubGlobal("fetch", vi.fn());
+      await expect(server._registeredTools[CREATE_AD].handler({
+        account_id: "act_123",
+        name: "Invalid",
+        ad_set_id: "2001",
+        status: "PAUSED",
+      })).rejects.toThrow(/exactly one/i);
+      expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+    });
   });
 
   afterEach(() => {

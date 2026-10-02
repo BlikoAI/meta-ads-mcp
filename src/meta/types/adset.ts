@@ -166,6 +166,7 @@ export interface AdSet {
   frequency_control_specs?: FrequencyControlSpec[];
   promoted_object?: Record<string, unknown>;
   destination_type?: DestinationType;
+  is_dynamic_creative?: boolean;
 }
 
 export const ADSET_DEFAULT_FIELDS = [
@@ -187,4 +188,5 @@ export const ADSET_DEFAULT_FIELDS = [
   "created_time",
   "updated_time",
   "destination_type",
+  "is_dynamic_creative",
 ] as const;

@@ -792,12 +792,14 @@ describe("registerAdSetTools", () => {
         optimization_goal: "LINK_CLICKS",
         billing_event: "IMPRESSIONS",
         targeting: { geo_locations: { countries: ["MX"] } },
+        is_dynamic_creative: true,
       });
 
       const call = vi.mocked(fetch).mock.calls[0];
       const params = new URLSearchParams(call[1]?.body as string);
       expect(params.has("daily_budget")).toBe(false);
       expect(params.has("lifetime_budget")).toBe(false);
+      expect(params.get("is_dynamic_creative")).toBe("true");
     });
   });
 

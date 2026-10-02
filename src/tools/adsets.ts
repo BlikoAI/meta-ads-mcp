@@ -830,13 +830,14 @@ export function registerAdSetTools(server: McpServer): void {
         start_time: z.string().optional().describe("ISO 8601 start time"),
         end_time: z.string().optional().describe("ISO 8601 end time (required for lifetime_budget)"),
         promoted_object: z.record(z.string(), z.unknown()).optional().describe("Promoted object (e.g., { page_id: '123' } or { pixel_id: '456', custom_event_type: 'PURCHASE' })"),
+        is_dynamic_creative: z.boolean().default(false).describe("Enable Dynamic Creative for this ad set. Must be chosen at creation time."),
       },
       annotations: { ...CREATE },
     },
     async ({
       account_id, campaign_id, name, destination_type, status, daily_budget, lifetime_budget,
       optimization_goal, billing_event, bid_amount, bid_strategy, targeting,
-      start_time, end_time, promoted_object,
+      start_time, end_time, promoted_object, is_dynamic_creative,
     }) => {
       const accountPath = normalizeAccountId(account_id);
       const campaignIdValidated = validateMetaId(campaign_id, "campaign");
@@ -849,6 +850,7 @@ export function registerAdSetTools(server: McpServer): void {
         optimization_goal,
         billing_event,
         targeting: JSON.stringify(targeting),
+        is_dynamic_creative,
       };
 
       if (daily_budget !== undefined) body.daily_budget = String(daily_budget);

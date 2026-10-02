@@ -6,8 +6,58 @@ import { buildFieldsParam, normalizeUrlTags, requireOneOf } from "../utils/valid
 import { AD_DEFAULT_FIELDS } from "../meta/types/ad.js";
 import type { Ad, AdCreative, MetaApiResponse } from "../meta/types/index.js";
 import { READ, CREATE, UPDATE, DELETE, WRITE_WARNING } from "./_register.js";
+import { uploadLocalImage, uploadLocalVideo } from "../bliko/meta-assets.js";
+import { ctaEnum } from "./creatives.js";
 
 const statusEnum = z.enum(["ACTIVE", "PAUSED", "DELETED", "ARCHIVED"]);
+
+const flexibleImageAssetSchema = z.object({
+  upload_id: z.string().uuid().optional(),
+  image_hash: z.string().min(1).optional(),
+}).refine(
+  (asset) => Boolean(asset.upload_id) !== Boolean(asset.image_hash),
+  "Each flexible image needs exactly one upload_id or image_hash.",
+);
+
+const flexibleVideoAssetSchema = z.object({
+  upload_id: z.string().uuid().optional(),
+  video_id: z.string().optional(),
+}).refine(
+  (asset) => Boolean(asset.upload_id) !== Boolean(asset.video_id),
+  "Each flexible video needs exactly one upload_id or video_id.",
+);
+
+export const flexibleAdSchema = z.object({
+  page_id: z.string(),
+  instagram_actor_id: z.string().optional(),
+  message: z.string().min(1),
+  headline: z.string().min(1),
+  description: z.string().optional(),
+  call_to_action_type: ctaEnum.default("LEARN_MORE"),
+  destination: z.object({
+    type: z.literal("lead_form"),
+    lead_gen_form_id: z.string(),
+    fallback_url: z.string().url(),
+  }),
+  creative_enhancements: z.enum(["OFF", "STANDARD"]).default("OFF"),
+  flexible_assets: z.object({
+    images: z.array(flexibleImageAssetSchema).min(1).max(10),
+    videos: z.array(flexibleVideoAssetSchema).min(1).max(10),
+  }),
+});
+
+const INDIVIDUAL_CREATIVE_FEATURES = [
+  "ads_with_benefits",
+  "advantage_plus_creative",
+  "enhance_cta",
+  "inline_comment",
+  "show_destination_blurbs",
+  "text_optimizations",
+  "text_translation",
+  "video_auto_crop",
+  "video_filtering",
+  "video_uncrop",
+] as const;
 
 const CREATIVE_REBUILD_FIELDS =
   "id,name,object_story_spec,asset_feed_spec,effective_object_story_id,url_tags,instagram_user_id,source_instagram_media_id,effective_instagram_media_id,link_url,degrees_of_freedom_spec,destination_spec,wamo_whatsapp_identity_spec,call_to_action_type,adlabels";
@@ -49,6 +99,101 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function creativeFeaturesSpec(mode: "OFF" | "STANDARD") {
+  return Object.fromEntries(
+    INDIVIDUAL_CREATIVE_FEATURES.map((feature) => [
+      feature,
+      { enroll_status: mode === "STANDARD" ? "OPT_IN" : "OPT_OUT" },
+    ]),
+  );
+}
+
+async function buildFlexibleAdPayload(
+  accountId: string,
+  name: string,
+  spec: z.infer<typeof flexibleAdSchema>,
+): Promise<{
+  creative: Record<string, unknown>;
+  assetGroups: Record<string, unknown>;
+  expected: { images: number; videos: number };
+}> {
+  const pageId = validateMetaId(spec.page_id, "page");
+  const instagramActorId = spec.instagram_actor_id
+    ? validateMetaId(spec.instagram_actor_id, "instagram_actor")
+    : undefined;
+  const formId = validateMetaId(spec.destination.lead_gen_form_id, "lead_form");
+  const images: Array<{ hash: string }> = [];
+  const videos: Array<{ video_id: string }> = [];
+
+  for (const [index, asset] of spec.flexible_assets.images.entries()) {
+    images.push({
+      hash: asset.image_hash
+        ?? (await uploadLocalImage(accountId, asset.upload_id as string, `${name} image ${index + 1}`)).hash,
+    });
+  }
+  for (const [index, asset] of spec.flexible_assets.videos.entries()) {
+    videos.push({
+      video_id: asset.video_id
+        ? validateMetaId(asset.video_id, "video")
+        : (await uploadLocalVideo(accountId, asset.upload_id as string, `${name} video ${index + 1}`)).id,
+    });
+  }
+
+  if (new Set(images.map((asset) => asset.hash)).size !== images.length
+    || new Set(videos.map((asset) => asset.video_id)).size !== videos.length) {
+    throw new Error("flexible_ad cannot contain duplicate image hashes or video IDs.");
+  }
+
+  const cta = {
+    type: spec.call_to_action_type,
+    value: { link: spec.destination.fallback_url, lead_gen_form_id: formId },
+  };
+  const linkData: Record<string, unknown> = {
+    image_hash: images[0].hash,
+    link: spec.destination.fallback_url,
+    message: spec.message,
+    name: spec.headline,
+    call_to_action: cta,
+  };
+  if (spec.description) linkData.description = spec.description;
+
+  return {
+    creative: {
+      object_story_spec: {
+        page_id: pageId,
+        ...(instagramActorId ? { instagram_user_id: instagramActorId } : {}),
+        link_data: linkData,
+      },
+      degrees_of_freedom_spec: {
+        creative_features_spec: creativeFeaturesSpec(spec.creative_enhancements),
+      },
+    },
+    assetGroups: {
+      groups: [{
+        images,
+        videos,
+        texts: [
+          { text: spec.message, text_type: "primary_text" },
+          { text: spec.headline, text_type: "headline" },
+          ...(spec.description ? [{ text: spec.description, text_type: "description" }] : []),
+        ],
+        call_to_action: cta,
+      }],
+    },
+    expected: { images: images.length, videos: videos.length },
+  };
+}
+
+function flexibleAssetCounts(ad: Ad): { images: number; videos: number } {
+  return (ad.creative_asset_groups_spec?.groups ?? []).reduce(
+    (counts, group) => ({
+      images: counts.images + (group.images?.length ?? 0),
+      videos: counts.videos + (group.videos?.length ?? 0),
+    }),
+    { images: 0, videos: 0 },
+  );
 }
 
 function resolveInstagramUserId(creative: AdCreative): string | undefined {
@@ -245,12 +390,13 @@ export function registerAdTools(server: McpServer): void {
   server.registerTool(
     "ads_create_ad",
     {
-      description: `${WRITE_WARNING}Create a new ad within an ad set using an existing creative. Ads are created in PAUSED status by default.`,
+      description: `${WRITE_WARNING}Create an ad using exactly one mode: creative_id (standard, including a previously created Dynamic Creative) or flexible_ad (current flexible format). Multi-asset flexible ads are read back and automatically deleted if Meta drops any requested asset. Dynamic Creative must first be created with ads_create_ad_creative using asset_optimization=DYNAMIC, then passed here as creative_id. Ads default to PAUSED.`,
       inputSchema: {
         account_id: z.string().describe("Ad account ID"),
         name: z.string().min(1).describe("Ad name"),
         ad_set_id: z.string().describe("Ad set ID to place this ad in"),
-        creative_id: z.string().describe("Creative ID to use for this ad"),
+        creative_id: z.string().optional().describe("Existing creative ID for a standard ad. Mutually exclusive with flexible_ad."),
+        flexible_ad: flexibleAdSchema.optional().describe("Flexible lead-ad content and media pool. Mutually exclusive with creative_id."),
         status: z.enum(["ACTIVE", "PAUSED"]).default("PAUSED"),
         tracking_specs: z
           .array(z.record(z.string(), z.unknown()))
@@ -259,27 +405,65 @@ export function registerAdTools(server: McpServer): void {
       },
       annotations: { ...CREATE },
     },
-    async ({ account_id, name, ad_set_id, creative_id, status, tracking_specs }) => {
+    async ({ account_id, name, ad_set_id, creative_id, flexible_ad, status, tracking_specs }) => {
       const accountPath = normalizeAccountId(account_id);
       const adSetIdValidated = validateMetaId(ad_set_id, "adset");
-      const creativeIdValidated = validateMetaId(creative_id, "creative");
+
+      if ([creative_id, flexible_ad].filter(Boolean).length !== 1) {
+        throw new Error("Provide exactly one of creative_id or flexible_ad.");
+      }
 
       const body: Record<string, string | number | boolean> = {
         name,
         adset_id: adSetIdValidated,
-        creative: JSON.stringify({ creative_id: creativeIdValidated }),
         status,
       };
+
+      let expected: { images: number; videos: number } | undefined;
+      let multiAssetMode: "flexible" | undefined;
+      let creativeLabel: string;
+      if (flexible_ad) {
+        const built = await buildFlexibleAdPayload(accountPath, name, flexible_ad);
+        body.creative = JSON.stringify(built.creative);
+        body.creative_asset_groups_spec = JSON.stringify(built.assetGroups);
+        expected = built.expected;
+        multiAssetMode = "flexible";
+        creativeLabel = `Flexible (${expected.images} image(s), ${expected.videos} video(s))`;
+      } else {
+        const creativeIdValidated = validateMetaId(creative_id as string, "creative");
+        body.creative = JSON.stringify({ creative_id: creativeIdValidated });
+        creativeLabel = creativeIdValidated;
+      }
 
       if (tracking_specs) body.tracking_specs = JSON.stringify(tracking_specs);
 
       const result = await metaApiClient.postForm<{ id: string }>(`/${accountPath}/ads`, body);
 
+      if (expected && multiAssetMode) {
+        const created = await metaApiClient.get<Ad & {
+          creative?: { id: string };
+        }>(`/${validateMetaId(result.id, "ad")}`, {
+          fields: "id,name,status,effective_status,adset_id,creative{id},creative_asset_groups_spec",
+        });
+        const actual = flexibleAssetCounts(created);
+        if (actual.images !== expected.images || actual.videos !== expected.videos) {
+          let cleanup = "The malformed ad was automatically set to DELETED.";
+          try {
+            await metaApiClient.postForm<{ success: boolean }>(`/${result.id}`, { status: "DELETED" });
+          } catch (cleanupError) {
+            cleanup = `Automatic cleanup failed: ${errorMessage(cleanupError)}`;
+          }
+          throw new Error(
+            `Meta did not preserve the ${multiAssetMode} ad assets (expected ${expected.images} images and ${expected.videos} videos; read back ${actual.images} and ${actual.videos}). ${cleanup}`,
+          );
+        }
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: `Ad created successfully!\nID: ${result.id}\nName: ${name}\nAd Set: ${adSetIdValidated}\nCreative: ${creativeIdValidated}\nStatus: ${status}`,
+            text: `Ad created successfully!\nID: ${result.id}\nName: ${name}\nAd Set: ${adSetIdValidated}\nCreative: ${creativeLabel}\nStatus: ${status}`,
           },
         ],
       };

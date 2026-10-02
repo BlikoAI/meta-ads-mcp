@@ -17,6 +17,7 @@ import { downloadSafePublicImage } from "../utils/safe-download.js";
 import { READ, CREATE, UPDATE, UPLOAD, WRITE_WARNING } from "./_register.js";
 import { assetFilename, readAssetBytes } from "../bliko/assets.js";
 import { atomicWriteJson, readJson, recordPath } from "../bliko/persistence.js";
+import { uploadLocalImage, uploadLocalVideo } from "../bliko/meta-assets.js";
 
 export const ctaEnum = z.enum([
   // Core actions
@@ -43,6 +44,70 @@ export const ctaEnum = z.enum([
   // AI features (v25.0+)
   "SHOP_WITH_AI", "TRY_ON_WITH_AI",
 ]);
+
+const flexibleImageAssetSchema = z.object({
+  upload_id: z.string().uuid().optional(),
+  image_hash: z.string().min(1).optional(),
+}).refine(
+  (asset) => Boolean(asset.upload_id) !== Boolean(asset.image_hash),
+  "Each flexible image needs exactly one upload_id or image_hash.",
+);
+
+const flexibleVideoAssetSchema = z.object({
+  upload_id: z.string().uuid().optional(),
+  video_id: z.string().min(1).optional(),
+}).refine(
+  (asset) => Boolean(asset.upload_id) !== Boolean(asset.video_id),
+  "Each flexible video needs exactly one upload_id or video_id.",
+);
+
+export const flexibleAssetsSchema = z.object({
+  images: z.array(flexibleImageAssetSchema).min(1).max(10),
+  videos: z.array(flexibleVideoAssetSchema).min(1).max(10),
+});
+
+const INDIVIDUAL_CREATIVE_FEATURES = [
+  "ads_with_benefits",
+  "advantage_plus_creative",
+  "enhance_cta",
+  "inline_comment",
+  "show_destination_blurbs",
+  "text_optimizations",
+  "text_translation",
+  "video_auto_crop",
+  "video_filtering",
+  "video_uncrop",
+] as const;
+
+export function creativeFeaturesSpec(mode: "OFF" | "STANDARD") {
+  return Object.fromEntries(
+    INDIVIDUAL_CREATIVE_FEATURES.map((feature) => [
+      feature,
+      { enroll_status: mode === "STANDARD" ? "OPT_IN" : "OPT_OUT" },
+    ]),
+  );
+}
+
+type FlexibleAssets = z.infer<typeof flexibleAssetsSchema>;
+
+export async function resolveFlexibleAssets(accountId: string, name: string, assets: FlexibleAssets) {
+  const images: Array<{ hash: string }> = [];
+  const videos: Array<{ video_id: string }> = [];
+  for (const [index, asset] of assets.images.entries()) {
+    images.push({
+      hash: asset.image_hash
+        ?? (await uploadLocalImage(accountId, asset.upload_id as string, `${name} image ${index + 1}`)).hash,
+    });
+  }
+  for (const [index, asset] of assets.videos.entries()) {
+    videos.push({
+      video_id: asset.video_id
+        ? validateMetaId(asset.video_id, "video")
+        : (await uploadLocalVideo(accountId, asset.upload_id as string, `${name} video ${index + 1}`)).id,
+    });
+  }
+  return { images, videos };
+}
 
 export function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
@@ -230,7 +295,7 @@ export function registerCreativeTools(server: McpServer): void {
   server.registerTool(
     "ads_create_ad_creative",
     {
-      description: `${WRITE_WARNING}Create a new ad creative. Three modes: (1) Build from scratch with image/video + text via object_story_spec, (2) Promote an existing Facebook Page post via object_story_id ('Boost Post'), (3) Promote an existing Instagram post via source_instagram_media_id. The creative can then be used when creating ads. Important: scratch-built video creatives require a thumbnail via image_hash or image_url; Meta rejects video_id without one.`,
+      description: `${WRITE_WARNING}Create a new ad creative. Supports standard, carousel, placement and dynamic flexible media-pool creatives. flexible_assets is intended for ad sets created with is_dynamic_creative=true.`,
       inputSchema: {
         account_id: z.string().describe("Ad account ID"),
         name: z.string().min(1).describe("Creative name"),
@@ -259,19 +324,30 @@ export function registerCreativeTools(server: McpServer): void {
           link_url: z.string().url().optional(),
         }).refine((card) => Boolean(card.image_hash) !== Boolean(card.video_id), "Each card needs exactly one image_hash or video_id." )).min(2).max(10).optional(),
         creative_enhancements: z.enum(["OFF", "STANDARD"]).default("OFF"),
+        asset_optimization: z.enum(["DYNAMIC", "FLEXIBLE"]).default("FLEXIBLE")
+          .describe("How Meta should optimize flexible_assets. DYNAMIC uses classic Dynamic Creative (REGULAR) and requires an ad set with is_dynamic_creative=true. FLEXIBLE uses Advantage+ flexible format (DEGREES_OF_FREEDOM)."),
         placement_assets: z.object({
           feed: z.object({ image_hash: z.string().optional(), video_id: z.string().optional() }).optional(),
           stories: z.object({ image_hash: z.string().optional(), video_id: z.string().optional() }).optional(),
           reels: z.object({ image_hash: z.string().optional(), video_id: z.string().optional() }).optional(),
         }).optional(),
+        flexible_assets: flexibleAssetsSchema.optional().describe("Dynamic media pool. Images accept upload_id or image_hash; videos accept upload_id or video_id. Mutually exclusive with placement_assets and carousel_cards."),
       },
       annotations: { ...CREATE },
     },
     async ({
       account_id, name, page_id, object_story_id, instagram_actor_id, source_instagram_media_id,
       image_hash, image_url, video_id, link_url, message, headline, description,
-      call_to_action_type, url_tags, destination, carousel_cards, creative_enhancements = "OFF", placement_assets,
+      call_to_action_type, url_tags, destination, carousel_cards, creative_enhancements = "OFF", asset_optimization = "FLEXIBLE", placement_assets,
+      flexible_assets,
     }) => {
+      const competingAssetModes = [carousel_cards, placement_assets, flexible_assets].filter(Boolean).length;
+      if (competingAssetModes > 1) {
+        throw new Error("flexible_assets, placement_assets and carousel_cards are mutually exclusive.");
+      }
+      if (flexible_assets && (image_hash || image_url || video_id || object_story_id || source_instagram_media_id)) {
+        throw new Error("flexible_assets cannot be combined with top-level image/video media or promoted-post modes.");
+      }
       const accountPath = normalizeAccountId(account_id);
       const pageIdValidated = page_id ? validateMetaId(page_id, "page") : undefined;
       const objectStoryIdValidated = object_story_id
@@ -296,6 +372,9 @@ export function registerCreativeTools(server: McpServer): void {
       const leadGenFormId = destination?.type === "lead_form"
         ? validateMetaId(destination.lead_gen_form_id, "lead_form")
         : undefined;
+      const resolvedFlexibleAssets = flexible_assets
+        ? await resolveFlexibleAssets(accountPath, name, flexible_assets)
+        : undefined;
 
       if (sourceInstagramMediaIdValidated) {
         body.source_instagram_media_id = sourceInstagramMediaIdValidated;
@@ -314,7 +393,7 @@ export function registerCreativeTools(server: McpServer): void {
         if (!pageIdValidated) {
           throw new Error("page_id is required when building a creative from scratch (no object_story_id or source_instagram_media_id provided).");
         }
-        if (videoIdValidated && !image_hash && !image_url && !placement_assets) {
+        if (videoIdValidated && !image_hash && !image_url && !placement_assets && !resolvedFlexibleAssets) {
           throw new Error("video creatives built from scratch require image_hash or image_url as a thumbnail.");
         }
         if (image_url && !image_hash) {
@@ -329,7 +408,11 @@ export function registerCreativeTools(server: McpServer): void {
         }
         const objectStorySpec: Record<string, unknown> = { page_id: pageIdValidated };
 
-        if (carousel_cards) {
+        if (resolvedFlexibleAssets) {
+          // Dynamic/FLEX creatives keep all variable content in asset_feed_spec.
+          // Adding a fallback image or link_data here makes Meta classify the
+          // creative as a standard single-media creative in Dynamic ad sets.
+        } else if (carousel_cards) {
           const childAttachments = carousel_cards.map((card) => ({
             ...(card.image_hash ? { image_hash: card.image_hash } : { video_id: validateMetaId(card.video_id as string, "video") }),
             ...(card.headline ? { name: card.headline } : {}),
@@ -395,9 +478,7 @@ export function registerCreativeTools(server: McpServer): void {
 
       if (url_tags) body.url_tags = url_tags;
       body.degrees_of_freedom_spec = JSON.stringify({
-        creative_features_spec: {
-          standard_enhancements: { enroll_status: creative_enhancements === "STANDARD" ? "OPT_IN" : "OPT_OUT" },
-        },
+        creative_features_spec: creativeFeaturesSpec(creative_enhancements),
       });
       if (placement_assets) {
         const images: unknown[] = [];
@@ -420,6 +501,30 @@ export function registerCreativeTools(server: McpServer): void {
         }
         body.asset_feed_spec = JSON.stringify({ images, videos, asset_customization_rules: assetCustomizationRules });
       }
+      if (resolvedFlexibleAssets) {
+        const ctaType = call_to_action_type ?? "LEARN_MORE";
+        const flexibleLink = resolvedLinkUrl ?? "https://www.facebook.com/";
+        body.asset_feed_spec = JSON.stringify({
+          images: resolvedFlexibleAssets.images,
+          videos: resolvedFlexibleAssets.videos,
+          bodies: message ? [{ text: message }] : undefined,
+          titles: headline ? [{ text: headline }] : undefined,
+          descriptions: description ? [{ text: description }] : undefined,
+          link_urls: [{ website_url: flexibleLink }],
+          call_to_action_types: [ctaType],
+          call_to_actions: [{
+            type: ctaType,
+            value: {
+              link: flexibleLink,
+              ...(leadGenFormId ? { lead_gen_form_id: leadGenFormId } : {}),
+            },
+          }],
+          ad_formats: asset_optimization === "DYNAMIC"
+            ? ["AUTOMATIC_FORMAT"]
+            : ["SINGLE_IMAGE", "SINGLE_VIDEO"],
+          optimization_type: asset_optimization === "DYNAMIC" ? "REGULAR" : "DEGREES_OF_FREEDOM",
+        });
+      }
 
       const result = await metaApiClient.postForm<{ id: string }>(
         `/${accountPath}/adcreatives`,
@@ -428,13 +533,23 @@ export function registerCreativeTools(server: McpServer): void {
 
       let effectiveStoryId: string | undefined;
       try {
-        const created = await metaApiClient.get<{ id: string; effective_object_story_id?: string }>(
+        const created = await metaApiClient.get<{
+          id: string;
+          effective_object_story_id?: string;
+          asset_feed_spec?: { images?: unknown[]; videos?: unknown[] };
+        }>(
           `/${validateMetaId(result.id, "creative")}`,
-          { fields: "id,effective_object_story_id" },
+          { fields: resolvedFlexibleAssets ? "id,effective_object_story_id,asset_feed_spec" : "id,effective_object_story_id" },
         );
         effectiveStoryId = created.effective_object_story_id;
-      } catch {
-        // Non-critical
+        if (resolvedFlexibleAssets
+          && (created.asset_feed_spec?.images?.length !== resolvedFlexibleAssets.images.length
+            || created.asset_feed_spec?.videos?.length !== resolvedFlexibleAssets.videos.length)) {
+          throw new Error("Meta accepted the creative but did not preserve its dynamic image/video pool.");
+        }
+      } catch (error) {
+        if (resolvedFlexibleAssets) throw error;
+        // Non-critical for simple creatives.
       }
 
       return {

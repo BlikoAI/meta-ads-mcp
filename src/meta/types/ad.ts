@@ -10,6 +10,16 @@ export interface Ad {
   creative?: {
     id: string;
   };
+  creative_asset_groups_spec?: {
+    groups?: Array<{
+      images?: Array<{ hash?: string }>;
+      videos?: Array<{ video_id?: string }>;
+      texts?: Array<{ text?: string; text_type?: string }>;
+      call_to_action?: Record<string, unknown>;
+    }>;
+    origin?: string;
+    origins?: string[];
+  };
   tracking_specs?: Array<Record<string, unknown>>;
   created_time: string;
   updated_time: string;
@@ -24,6 +34,7 @@ export const AD_DEFAULT_FIELDS = [
   "status",
   "effective_status",
   "creative{id}",
+  "creative_asset_groups_spec",
   "created_time",
   "updated_time",
 ] as const;

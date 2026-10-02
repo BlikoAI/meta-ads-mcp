@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { registerCreativeTools } from "../../src/tools/creatives.js";
+import { flexibleAssetsSchema, registerCreativeTools } from "../../src/tools/creatives.js";
+import { uploadLocalImage, uploadLocalVideo } from "../../src/bliko/meta-assets.js";
 import {
   CREATIVE_DEFAULT_FIELDS,
   SYNTHETIC_CREATIVE_FIELDS,
@@ -11,9 +12,16 @@ import {
   mockFetchResponse,
 } from "../setup.js";
 
+vi.mock("../../src/bliko/meta-assets.js", () => ({
+  uploadLocalImage: vi.fn(),
+  uploadLocalVideo: vi.fn(),
+}));
+
 describe("registerCreativeTools", () => {
   beforeEach(() => {
     setupTestToken();
+    vi.mocked(uploadLocalImage).mockResolvedValue({ hash: "uploaded-image-hash", reused: false });
+    vi.mocked(uploadLocalVideo).mockResolvedValue({ id: "880099", reused: false });
   });
 
   afterEach(() => {
@@ -343,6 +351,67 @@ describe("registerCreativeTools", () => {
   });
 
   describe("ads_create_ad_creative handler", () => {
+    it("validates dynamic flexible image/video references", () => {
+      expect(flexibleAssetsSchema.safeParse({
+        images: [{ image_hash: "img-1" }],
+        videos: [{ video_id: "8001" }],
+      }).success).toBe(true);
+      expect(flexibleAssetsSchema.safeParse({
+        images: [],
+        videos: [{ video_id: "8001" }],
+      }).success).toBe(false);
+    });
+
+    it("creates and verifies a dynamic 3+3 lead creative", async () => {
+      const server = createMockMcpServer();
+      registerCreativeTools(server as never);
+      vi.stubGlobal("fetch", vi.fn()
+        .mockResolvedValueOnce(mockFetchResponse({ id: "40099" }))
+        .mockResolvedValueOnce(mockFetchResponse({
+          id: "40099",
+          asset_feed_spec: {
+            images: [{ hash: "i1" }, { hash: "i2" }, { hash: "i3" }],
+            videos: [{ video_id: "8001" }, { video_id: "8002" }, { video_id: "8003" }],
+          },
+        })));
+
+      const handler = server._registeredTools[2].handler;
+      await handler({
+        account_id: "act_123",
+        name: "Dynamic lead creative",
+        page_id: "6001",
+        instagram_actor_id: "7001",
+        message: "Primary copy",
+        headline: "Headline",
+        description: "Description",
+        call_to_action_type: "LEARN_MORE",
+        destination: { type: "lead_form", lead_gen_form_id: "9001", fallback_url: "https://example.com/demo" },
+        creative_enhancements: "OFF",
+        asset_optimization: "DYNAMIC",
+        flexible_assets: {
+          images: [{ image_hash: "i1" }, { image_hash: "i2" }, { image_hash: "i3" }],
+          videos: [{ video_id: "8001" }, { video_id: "8002" }, { video_id: "8003" }],
+        },
+      });
+
+      const params = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1]?.body as string);
+      const feed = JSON.parse(params.get("asset_feed_spec") ?? "{}");
+      expect(feed.images).toHaveLength(3);
+      expect(feed.videos).toHaveLength(3);
+      expect(feed.ad_formats).toEqual(["AUTOMATIC_FORMAT"]);
+      expect(feed.optimization_type).toBe("REGULAR");
+      expect(feed.call_to_actions).toEqual([{
+        type: "LEARN_MORE",
+        value: { link: "https://example.com/demo", lead_gen_form_id: "9001" },
+      }]);
+      const story = JSON.parse(params.get("object_story_spec") ?? "{}");
+      expect(story).toEqual({ page_id: "6001", instagram_user_id: "7001" });
+      const freedoms = JSON.parse(params.get("degrees_of_freedom_spec") ?? "{}");
+      expect(Object.values(freedoms.creative_features_spec).every(
+        (feature) => (feature as { enroll_status: string }).enroll_status === "OPT_OUT",
+      )).toBe(true);
+    });
+
     it("fails locally when a scratch video creative is missing thumbnail data", async () => {
       const server = createMockMcpServer();
       registerCreativeTools(server as never);
