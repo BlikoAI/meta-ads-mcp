@@ -1,0 +1,19 @@
+FROM node:22-alpine3.24 AS builder
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci --ignore-scripts
+COPY src/ src/
+RUN npm run build
+
+FROM node:22-alpine3.24
+WORKDIR /app
+ENV NODE_ENV=production
+RUN apk add --no-cache ffmpeg
+COPY --from=builder /app/dist/ dist/
+COPY --from=builder /app/node_modules/ node_modules/
+COPY package.json ./
+COPY skills/ skills/
+RUN mkdir -p /data/bliko-e2e && chown -R node:node /data
+EXPOSE 3000
+USER node
+CMD ["node", "dist/index.js"]
