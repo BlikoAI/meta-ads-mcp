@@ -801,24 +801,6 @@ describe("registerAdSetTools", () => {
       expect(params.has("lifetime_budget")).toBe(false);
       expect(params.get("is_dynamic_creative")).toBe("true");
     });
-    it("creates a paused dynamic set under campaign budget without changing its optimization or pixel", async () => {
-      const server = createMockMcpServer();
-      registerAdSetTools(server as never);
-      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockFetchResponse({ id: "2002" })));
-      const tool = server._registeredTools.find(t => t.name === "ads_create_ad_set")!;
-      const promoted = { pixel_id: "1552247", custom_event_type: "OTHER", custom_event_str: "QualifiedLead" };
-      await tool.handler({ account_id: "act_123", campaign_id: "1001", name: "Dynamic promotion",
-        destination_type: "ON_AD", status: "PAUSED", optimization_goal: "QUALITY_LEAD",
-        billing_event: "IMPRESSIONS", targeting: { geo_locations: { countries: ["ES"] } },
-        promoted_object: promoted, is_dynamic_creative: true });
-      const params = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1]?.body as string);
-      expect(params.get("is_dynamic_creative")).toBe("true");
-      expect(params.get("status")).toBe("PAUSED");
-      expect(params.get("optimization_goal")).toBe("QUALITY_LEAD");
-      expect(JSON.parse(params.get("promoted_object")!)).toEqual(promoted);
-      expect(params.has("daily_budget")).toBe(false);
-      expect(params.has("lifetime_budget")).toBe(false);
-    });
   });
 
   describe("ads_update_ad_set handler", () => {
@@ -849,6 +831,26 @@ describe("registerAdSetTools", () => {
 
       expect(result.content[0].text).toContain("Ad set 2001 updated successfully");
       expect(result.content[0].text).toContain("daily_budget");
+    });
+  });
+  describe("Dynamic Creative with campaign budgets", () => {
+    it("creates a paused dynamic set under campaign budget without changing its optimization or pixel", async () => {
+      const server = createMockMcpServer();
+      registerAdSetTools(server as never);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockFetchResponse({ id: "2002" })));
+      const tool = server._registeredTools.find(t => t.name === "ads_create_ad_set")!;
+      const promoted = { pixel_id: "1552247", custom_event_type: "OTHER", custom_event_str: "QualifiedLead" };
+      await tool.handler({ account_id: "act_123", campaign_id: "1001", name: "Dynamic promotion",
+        destination_type: "ON_AD", status: "PAUSED", optimization_goal: "QUALITY_LEAD",
+        billing_event: "IMPRESSIONS", targeting: { geo_locations: { countries: ["ES"] } },
+        promoted_object: promoted, is_dynamic_creative: true });
+      const params = new URLSearchParams(vi.mocked(fetch).mock.calls[0][1]?.body as string);
+      expect(params.get("is_dynamic_creative")).toBe("true");
+      expect(params.get("status")).toBe("PAUSED");
+      expect(params.get("optimization_goal")).toBe("QUALITY_LEAD");
+      expect(JSON.parse(params.get("promoted_object")!)).toEqual(promoted);
+      expect(params.has("daily_budget")).toBe(false);
+      expect(params.has("lifetime_budget")).toBe(false);
     });
   });
 });
