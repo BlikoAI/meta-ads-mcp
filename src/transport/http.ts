@@ -1,3 +1,5 @@
+import { publishedTools } from "../tools/operator-policy.js";
+import { operatorContext, verifyOperatorIdentity } from "../auth/operator.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isIP } from "node:net";
 import express from "express";
@@ -716,13 +718,37 @@ export async function startHttpTransport(
   const auth = createCombinedAuthMiddleware(oauthBearerAuth);
   const metaTokenMw = buildMetaTokenMiddleware(serverUrl, config.multiTenantEnabled);
 
-  app.post("/mcp", auth, metaTokenMw, async (req, res) => {
+  const operatorAuth: express.RequestHandler = (req, res, next) => {
+    if (process.env.MCP_TOOL_PROFILE !== "operator") return next();
+    const identity = verifyOperatorIdentity(req.get("x-bliko-identity"), req.body);
+    if (!identity) {
+      logger.warn({ event: "operator_access_denied", method: req.body?.method,
+        tool: req.body?.params?.name }, "Missing, expired or untrusted operator identity");
+      res.status(403).json({ jsonrpc: "2.0", id: req.body?.id ?? null,
+        error: { code: -32003, message: "Operator connection authorization required" } });
+      return;
+    }
+    operatorContext.run(identity, next);
+  };
+
+  app.post("/mcp", auth, operatorAuth, metaTokenMw, async (req, res) => {
     try {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,
       });
 
       const server = createServer();
+      const names = publishedTools.get(server);
+      if (req.body?.method === "tools/call" && names && !names.has(req.body?.params?.name)) {
+        const identity = operatorContext.getStore();
+        logger.warn({ event: "operator_tool", decision: "deny", tool: req.body?.params?.name,
+          subject: identity?.subject, connection_id: identity?.connectionId,
+          profile: process.env.MCP_TOOL_PROFILE }, "MCP tool denied");
+        await server.close();
+        res.status(403).json({ jsonrpc: "2.0", id: req.body?.id ?? null,
+          error: { code: -32003, message: "Tool denied by access policy" } });
+        return;
+      }
       await server.connect(transport);
 
       // Registered before handling so a client disconnect mid-request closes the

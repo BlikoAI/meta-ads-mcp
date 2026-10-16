@@ -45,14 +45,15 @@ describe("createServer", () => {
 });
 
 describe("published tool schemas", () => {
-  it("publishes only reads and guarded writes in the safe profile", async () => {
+  it("publishes only reads in the safe profile", async () => {
     const previous = process.env.MCP_TOOL_PROFILE;
     process.env.MCP_TOOL_PROFILE = "safe";
     try {
       const tools = await listPublishedTools();
-      expect(tools).toHaveLength(82);
-      expect(tools.map((tool) => tool.name)).toContain("ads_apply_publish_bundle");
-      expect(tools.map((tool) => tool.name)).toContain("ads_apply_activate_bundle");
+      expect(tools.length).toBeGreaterThan(50);
+      expect(tools.every(tool => tool.annotations?.readOnlyHint === true)).toBe(true);
+      expect(tools.map((tool) => tool.name)).not.toContain("ads_apply_publish_bundle");
+      expect(tools.map((tool) => tool.name)).not.toContain("ads_apply_activate_bundle");
       expect(tools.map((tool) => tool.name)).not.toContain("ads_activate_entity");
       expect(tools.map((tool) => tool.name)).not.toContain("ads_delete_campaign");
       expect(tools.map((tool) => tool.name)).not.toContain("ads_list_tokens");

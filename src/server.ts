@@ -1,3 +1,5 @@
+import { operatorContext, operatorGrantAllowed } from "./auth/operator.js";
+import { OPERATOR_WRITES, safeRead, operatorArgumentsAllowed, publishedTools } from "./tools/operator-policy.js";
 import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAllTools } from "./tools/index.js";
@@ -45,26 +47,34 @@ export function createServer(): McpServer {
     { instructions: SERVER_INSTRUCTIONS },
   );
 
-  // The public Bliko endpoint exposes every read plus only the guarded writes
-  // required for plan/apply publishing. A separate private instance runs with
-  // MCP_TOOL_PROFILE=admin for backwards-compatible access to all tools.
-  if (process.env["MCP_TOOL_PROFILE"] === "safe") {
-    const guardedWrites = new Set([
-      "ads_begin_asset_upload", "ads_upload_asset_chunk", "ads_finalize_asset_upload", "ads_delete_asset_upload",
-      "ads_apply_publish_bundle", "ads_apply_activate_bundle", "ads_pause_publish_bundle",
-      "ads_create_test_lead",
-    ]);
-    const hiddenReads = new Set([
-      "ads_list_tokens", "ads_get_gemini_key_status", "ads_library_get_apify_token_status",
-    ]);
+  const profile = process.env["MCP_TOOL_PROFILE"];
+  if (profile && !["safe", "operator", "admin"].includes(profile)) throw new Error("Unknown MCP_TOOL_PROFILE");
+  if (profile === "safe" || profile === "operator") {
+    const identity = operatorContext.getStore();
+    const isOperator = () => profile === "operator" && identity !== undefined && operatorGrantAllowed(identity);
+    const names = new Set<string>();
+    publishedTools.set(server, names);
     const original = server.registerTool.bind(server);
-    server.registerTool = ((name: string, config: { annotations?: { readOnlyHint?: boolean } }, handler: unknown) => {
-      if (!name.startsWith("whatsapp_") && !hiddenReads.has(name)
-        && (config.annotations?.readOnlyHint === true || guardedWrites.has(name))) {
-        return original(name, config as never, handler as never);
-      }
-      logger.debug({ event: "safe_profile_tool_hidden", tool: name }, "Tool hidden by safe profile");
-      return undefined as never;
+    server.registerTool = ((name: string, config: { annotations?: { readOnlyHint?: boolean } }, handler: (...args: unknown[]) => Promise<unknown>) => {
+      const read = safeRead(name, config.annotations?.readOnlyHint);
+      if (!read && !(isOperator() && OPERATOR_WRITES.has(name))) return undefined as never;
+      names.add(name);
+      const guarded = async (...args: unknown[]) => {
+        const allowed = read || (isOperator() && OPERATOR_WRITES.has(name) && operatorArgumentsAllowed(args[0]));
+        const audit = { event: "operator_tool", tool: name, subject: identity?.subject,
+          connection_id: identity?.connectionId, profile, write: !read };
+        logger.info({ ...audit, decision: allowed ? "allow" : "deny" }, "MCP access decision");
+        if (!allowed) return { isError: true, content: [{ type: "text", text: "Access denied by operator policy" }] };
+        try {
+          const result = await handler(...args);
+          logger.info({ ...audit, outcome: (result as { isError?: boolean })?.isError ? "error" : "success" }, "MCP tool completed");
+          return result;
+        } catch (error) {
+          logger.info({ ...audit, outcome: "error" }, "MCP tool failed");
+          throw error;
+        }
+      };
+      return original(name, config as never, guarded as never);
     }) as typeof server.registerTool;
   }
 
